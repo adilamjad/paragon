@@ -1,0 +1,7 @@
+Date,Time,Type,Category,Member,Amount,Currency,Notes,Transaction_ID
+2026-11-01,09:00:00,Income,Monthly Contribution,Adil,50000.00,PKR,Monthly house fund contribution,tx_import_inc_adil_1
+2026-11-01,09:30:00,Income,Monthly Contribution,Faiza,35000.00,PKR,Monthly house fund contribution,tx_import_inc_faiza_1
+2026-11-01,10:00:00,Income,Monthly Contribution,Haseeb,35000.00,PKR,Monthly house fund contribution,tx_import_inc_haseeb_1
+2026-11-01,12:30:00,Expense,Rent,Adil,45000.00,PKR,Parents house monthly rent,tx_import_rent_1
+2026-11-01,14:45:00,Expense,Medical,Faiza,6500.00,PKR,Pharmacy and checkup,tx_import_med_1
+2026-11-01,16:00:00,Expense,Groceries,Haseeb,12000.00,PKR,Weekly household groceries,tx_import_groc_1
