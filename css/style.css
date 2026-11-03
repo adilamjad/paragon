@@ -141,7 +141,7 @@ button:active {
   position: relative;
   background: var(--bg-primary);
   box-shadow: 0 0 50px rgba(0, 0, 0, 0.3);
-  padding-bottom: calc(76px + var(--sab));
+  padding-bottom: calc(24px + var(--sab));
 }
 
 /* --- Top Header Bar --- */
@@ -149,16 +149,23 @@ button:active {
   position: sticky;
   top: 0;
   z-index: 50;
-  padding-top: calc(12px + var(--sat));
-  padding-bottom: 12px;
+  padding-top: calc(10px + var(--sat));
+  padding-bottom: 8px;
   padding-inline: 12px;
   background: var(--bg-glass);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border-bottom: 1px solid var(--border-color);
   display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.header-top-row {
+  display: flex;
   align-items: center;
   justify-content: space-between;
+  width: 100%;
 }
 
 .brand-section {
@@ -1104,39 +1111,29 @@ button:active {
 }
 
 /* ==========================================================================
-   BOTTOM NAVIGATION BAR (iOS / Mobile Native Feel)
+   TOP NAVIGATION BAR
    ========================================================================== */
-.bottom-nav {
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  max-width: 480px;
-  margin: 0 auto;
-  z-index: 90;
-  background: var(--bg-glass);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border-top: 1px solid var(--border-color);
-  display: flex;
-  justify-content: space-around;
-  padding-top: 8px;
-  padding-bottom: calc(8px + var(--sab));
-  padding-inline: 12px;
+.top-nav {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  width: 100%;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  padding: 4px;
 }
 
 .nav-tab-btn {
-  flex: 1;
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 4px;
+  gap: 6px;
   color: var(--text-muted);
-  font-size: 0.72rem;
-  font-weight: 600;
-  padding: 8px 4px;
-  min-height: 52px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  padding: 8px 6px;
+  min-height: 38px;
   border-radius: var(--radius-md);
   cursor: pointer;
   background: transparent;
@@ -1150,18 +1147,21 @@ button:active {
 }
 
 .nav-tab-btn svg {
-  width: 22px;
-  height: 22px;
+  width: 17px;
+  height: 17px;
+  flex-shrink: 0;
   transition: transform var(--transition-spring);
 }
 
 .nav-tab-btn.active {
-  color: var(--primary);
+  color: #ffffff;
+  background: var(--grad-primary);
+  box-shadow: 0 2px 10px var(--primary-glow);
 }
 
 .nav-tab-btn.active svg {
-  transform: translateY(-2px) scale(1.1);
-  stroke-width: 2.4;
+  transform: scale(1.05);
+  stroke-width: 2.3;
 }
 
 /* ==========================================================================
