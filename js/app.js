@@ -234,6 +234,7 @@
     householdId: DEFAULT_HOUSEHOLD_ID,
     cycleStartDay: 1,
     cycleStartDate: '',
+    cycleEndDate: '',
     cycleLockedCustom: false
   };
 
@@ -482,16 +483,83 @@
     return n + (s[(v - 20) % 10] || s[v] || s[0]);
   }
 
+  const MONTH_NAME_MAP = {
+    jan: 1, january: 1,
+    feb: 2, february: 2,
+    mar: 3, march: 3,
+    apr: 4, april: 4,
+    may: 5,
+    jun: 6, june: 6,
+    jul: 7, july: 7,
+    aug: 8, august: 8,
+    sep: 9, sept: 9, september: 9,
+    oct: 10, october: 10,
+    nov: 11, november: 11,
+    dec: 12, december: 12
+  };
+
+  function normalizeDateYMD(rawDate, fallbackTimestamp) {
+    if (rawDate) {
+      const str = String(rawDate).trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+        return str;
+      }
+      const clean = str.replace(/[,/.\s]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+      const parts = clean.split('-');
+      if (parts.length === 3) {
+        const parseMonthToken = (tok) => {
+          const low = String(tok).toLowerCase();
+          if (MONTH_NAME_MAP[low]) return MONTH_NAME_MAP[low];
+          const num = parseInt(tok, 10);
+          return (!isNaN(num) && num >= 1 && num <= 12) ? num : null;
+        };
+
+        let y = null, m = null, d = null;
+        if (parts[0].length === 4 && !isNaN(parseInt(parts[0], 10))) {
+          y = parseInt(parts[0], 10);
+          m = parseMonthToken(parts[1]);
+          d = parseInt(parts[2], 10);
+        } else if (parts[2].length === 4 && !isNaN(parseInt(parts[2], 10))) {
+          y = parseInt(parts[2], 10);
+          const mMid = parseMonthToken(parts[1]);
+          const mFirst = parseMonthToken(parts[0]);
+          if (mMid !== null && !isNaN(parseInt(parts[0], 10))) {
+            d = parseInt(parts[0], 10);
+            m = mMid;
+          } else if (mFirst !== null && !isNaN(parseInt(parts[1], 10))) {
+            m = mFirst;
+            d = parseInt(parts[1], 10);
+          }
+        }
+        if (y && m && d && d >= 1 && d <= 31) {
+          return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+        }
+      }
+      const parsedDt = new Date(str);
+      if (!isNaN(parsedDt.getTime())) {
+        return formatDateYMD(parsedDt);
+      }
+    }
+    if (fallbackTimestamp) {
+      const tsDt = new Date(fallbackTimestamp);
+      if (!isNaN(tsDt.getTime())) {
+        return formatDateYMD(tsDt);
+      }
+    }
+    return '';
+  }
+
   /**
    * Computes the active or offset monthly expenditure cycle period.
    * For example, if cycleStartDay is 23 (or cycleStartDate is '2026-10-23'),
    * the cycle runs from 23 Oct 2026 to 22 Nov 2026 ("November 2026 Budget").
    */
-  function getCyclePeriod(offsetMonths = 0, customStartDateStr = null, customStartDay = null) {
+  function getCyclePeriod(offsetMonths = 0, customStartDateStr = null, customStartDay = null, customEndDateStr = null) {
     const now = new Date();
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
     const activeDateStr = customStartDateStr !== null ? customStartDateStr : (settings.cycleStartDate || '');
+    const activeEndStr = customEndDateStr !== null ? customEndDateStr : (settings.cycleEndDate || '');
     const activeDay = customStartDay !== null
       ? Math.min(31, Math.max(1, parseInt(customStartDay, 10) || 1))
       : Math.min(31, Math.max(1, parseInt(settings.cycleStartDay, 10) || 1));
@@ -500,21 +568,14 @@
     let baseStartMonth = today.getMonth();
     let startDay = activeDay;
 
-    // If an explicit custom date is provided (either in preview or locked custom cycle),
-    // or if the saved cycleStartDate contains today, anchor from it.
+    // If a cycleStartDate is configured (or passed for preview), anchor directly to it
     let usedExplicitAnchor = false;
     if (activeDateStr && /^\d{4}-\d{2}-\d{2}$/.test(activeDateStr)) {
       const parts = activeDateStr.split('-').map(n => parseInt(n, 10));
-      const anchorStart = new Date(parts[0], parts[1] - 1, parts[2]);
-      const nextAnchorStart = createClampedDate(parts[0], parts[1], parts[2]);
-      const anchorEnd = new Date(nextAnchorStart.getFullYear(), nextAnchorStart.getMonth(), nextAnchorStart.getDate() - 1);
-
-      if (customStartDateStr !== null || settings.cycleLockedCustom || (today >= anchorStart && today <= anchorEnd)) {
-        baseStartYear = parts[0];
-        baseStartMonth = parts[1] - 1;
-        startDay = parts[2];
-        usedExplicitAnchor = true;
-      }
+      baseStartYear = parts[0];
+      baseStartMonth = parts[1] - 1;
+      startDay = parts[2];
+      usedExplicitAnchor = true;
     }
 
     if (!usedExplicitAnchor) {
@@ -531,8 +592,20 @@
 
     const targetMonthIndex = baseStartMonth + offsetMonths;
     const cycleStart = createClampedDate(baseStartYear, targetMonthIndex, startDay);
-    const nextCycleStart = createClampedDate(baseStartYear, targetMonthIndex + 1, startDay);
-    const cycleEnd = new Date(nextCycleStart.getFullYear(), nextCycleStart.getMonth(), nextCycleStart.getDate() - 1);
+    let cycleEnd;
+
+    if (offsetMonths === 0 && activeEndStr && /^\d{4}-\d{2}-\d{2}$/.test(activeEndStr)) {
+      const endParts = activeEndStr.split('-').map(n => parseInt(n, 10));
+      const parsedEnd = new Date(endParts[0], endParts[1] - 1, endParts[2]);
+      if (parsedEnd >= cycleStart) {
+        cycleEnd = parsedEnd;
+      }
+    }
+
+    if (!cycleEnd) {
+      const nextCycleStart = createClampedDate(baseStartYear, targetMonthIndex + 1, startDay);
+      cycleEnd = new Date(nextCycleStart.getFullYear(), nextCycleStart.getMonth(), nextCycleStart.getDate() - 1);
+    }
 
     const startYMD = formatDateYMD(cycleStart);
     const endYMD = formatDateYMD(cycleEnd);
@@ -572,7 +645,12 @@
       cycleKey: `${startYMD}_${endYMD}`,
       totalDays,
       daysElapsed,
-      isInCycle: (dateYMD) => Boolean(dateYMD && dateYMD >= startYMD && dateYMD <= endYMD)
+      isInCycle: (dateOrTs) => {
+        const norm = typeof dateOrTs === 'number'
+          ? normalizeDateYMD('', dateOrTs)
+          : normalizeDateYMD(dateOrTs);
+        return Boolean(norm && norm >= startYMD && norm <= endYMD);
+      }
     };
   }
 
@@ -586,11 +664,19 @@
     if (pillTextEl) {
       pillTextEl.textContent = cycle.rangeLabel;
     }
+    const fundPillTextEl = document.getElementById('fund-cycle-range-text');
+    if (fundPillTextEl) {
+      fundPillTextEl.textContent = cycle.rangeLabel;
+    }
     const exportSelect = document.getElementById('export-range-select');
-    if (exportSelect && exportSelect.options.length >= 3) {
+    if (exportSelect) {
       const prevCycle = getCyclePeriod(-1);
-      exportSelect.options[0].textContent = `This Cycle (${cycle.rangeLabel})`;
-      exportSelect.options[1].textContent = `Previous Cycle (${prevCycle.rangeLabel})`;
+      const optAll = exportSelect.querySelector('option[value="all"]');
+      const optThis = exportSelect.querySelector('option[value="this_month"]');
+      const optPrev = exportSelect.querySelector('option[value="prev_month"]');
+      if (optAll) optAll.textContent = `All Transactions (${transactions.length})`;
+      if (optThis) optThis.textContent = `This Cycle (${cycle.rangeLabel})`;
+      if (optPrev) optPrev.textContent = `Previous Cycle (${prevCycle.rangeLabel})`;
     }
   }
 
@@ -616,6 +702,15 @@
       const data = localStorage.getItem(STORAGE_KEY);
       if (data) {
         transactions = JSON.parse(data);
+        if (Array.isArray(transactions)) {
+          transactions.forEach(tx => {
+            if (tx) {
+              const norm = normalizeDateYMD(tx.date, tx.timestamp);
+              if (norm) tx.date = norm;
+              tx.amount = Number(tx.amount) || 0;
+            }
+          });
+        }
       } else {
         transactions = [];
       }
@@ -701,6 +796,9 @@
       snapshot.forEach((doc) => {
         const data = doc.data();
         if (data && data.id) {
+          const normDate = normalizeDateYMD(data.date, data.timestamp);
+          if (normDate) data.date = normDate;
+          data.amount = Number(data.amount) || 0;
           cloudTxs.push(data);
         }
       });
@@ -797,6 +895,7 @@
         if (data && data.cycleStartDay) {
           settings.cycleStartDay = Math.min(31, Math.max(1, parseInt(data.cycleStartDay, 10) || 1));
           settings.cycleStartDate = data.cycleStartDate || '';
+          settings.cycleEndDate = data.cycleEndDate || '';
           settings.cycleLockedCustom = Boolean(data.cycleLockedCustom);
           saveSettings(true);
           updateAnalytics();
@@ -870,6 +969,7 @@
     db.collection('households').doc(householdId).collection('settings').doc('cycle').set({
       cycleStartDay: settings.cycleStartDay || 1,
       cycleStartDate: settings.cycleStartDate || '',
+      cycleEndDate: settings.cycleEndDate || '',
       cycleLockedCustom: Boolean(settings.cycleLockedCustom),
       updatedAt: Date.now()
     }).catch((err) => console.warn('Firestore cycle upload error:', err));
@@ -1445,34 +1545,41 @@
     const currentCycle = getCyclePeriod(0);
     updateCycleSettingsSubtitle();
 
-    // --- 0. House Fund Overview (All-Time Incomes, Expenses, Net Balance & Sibling Breakdown) ---
-    let allTimeIncome = 0;
-    let allTimeExpense = 0;
+    // Filter transactions strictly by the chosen timeframe (currentCycle)
+    const thisMonthAllTxs = transactions.filter(t => currentCycle.isInCycle(t.date || t.timestamp));
+    const thisMonthExpenses = thisMonthAllTxs.filter(t => (t.type || 'expense') === 'expense');
+    const totalSpend = thisMonthExpenses.reduce((sum, t) => sum + t.amount, 0);
+
+    // --- 0. House Fund Overview (Filtered by Chosen Timeframe: Incomes, Expenses, Net Balance & Sibling Breakdown) ---
+    let cycleIncome = 0;
+    let cycleExpense = 0;
     const siblingStats = {};
     FAMILY_MEMBERS.forEach(m => {
       siblingStats[m.id] = { member: m, contributed: 0, spent: 0 };
     });
 
-    transactions.forEach(tx => {
+    thisMonthAllTxs.forEach(tx => {
       const mem = getMemberInfo(tx.spentBy || 'adil');
       if (tx.type === 'income') {
-        allTimeIncome += tx.amount;
+        cycleIncome += tx.amount;
         if (siblingStats[mem.id]) siblingStats[mem.id].contributed += tx.amount;
       } else {
-        allTimeExpense += tx.amount;
+        cycleExpense += tx.amount;
         if (siblingStats[mem.id]) siblingStats[mem.id].spent += tx.amount;
       }
     });
 
-    const netFundBalance = allTimeIncome - allTimeExpense;
+    const netFundBalance = cycleIncome - cycleExpense;
     const fundIncomeEl = document.getElementById('fund-total-income');
     const fundSpentEl = document.getElementById('fund-total-spent');
     const fundBalanceEl = document.getElementById('fund-net-balance');
     const fundStatusBadge = document.getElementById('fund-status-badge');
     const siblingGrid = document.getElementById('sibling-fund-grid');
+    const fundCycleRangeText = document.getElementById('fund-cycle-range-text');
 
-    if (fundIncomeEl) fundIncomeEl.textContent = `${settings.currency} ${formatNumber(allTimeIncome)}`;
-    if (fundSpentEl) fundSpentEl.textContent = `${settings.currency} ${formatNumber(allTimeExpense)}`;
+    if (fundCycleRangeText) fundCycleRangeText.textContent = currentCycle.rangeLabel;
+    if (fundIncomeEl) fundIncomeEl.textContent = `${settings.currency} ${formatNumber(cycleIncome)}`;
+    if (fundSpentEl) fundSpentEl.textContent = `${settings.currency} ${formatNumber(cycleExpense)}`;
     if (fundBalanceEl) {
       if (netFundBalance >= 0) {
         fundBalanceEl.textContent = `${settings.currency} ${formatNumber(netFundBalance)}`;
@@ -1519,10 +1626,6 @@
     if (overallTitle) overallTitle.textContent = currentCycle.title;
     const cycleRangeText = document.getElementById('analytics-cycle-range-text');
     if (cycleRangeText) cycleRangeText.textContent = currentCycle.rangeLabel;
-
-    const thisMonthAllTxs = transactions.filter(t => currentCycle.isInCycle(t.date));
-    const thisMonthExpenses = thisMonthAllTxs.filter(t => (t.type || 'expense') === 'expense');
-    const totalSpend = thisMonthExpenses.reduce((sum, t) => sum + t.amount, 0);
 
     // Key metrics
     if (txCountEl) txCountEl.textContent = thisMonthAllTxs.length.toString();
@@ -1771,19 +1874,23 @@
   }
 
   // --- CSV Export Logic ---
-  function generateCSV(dateFilter = 'all') {
+  function getFilteredExportTransactions(dateFilter = 'all') {
     let list = [...transactions];
-
     const currentCycle = getCyclePeriod(0);
     const prevCycle = getCyclePeriod(-1);
 
     if (dateFilter === 'this_month') {
-      list = list.filter(t => currentCycle.isInCycle(t.date));
+      list = list.filter(t => currentCycle.isInCycle(t.date || t.timestamp));
     } else if (dateFilter === 'prev_month') {
-      list = list.filter(t => prevCycle.isInCycle(t.date));
+      list = list.filter(t => prevCycle.isInCycle(t.date || t.timestamp));
     }
 
-    list.sort((a, b) => a.timestamp - b.timestamp);
+    list.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+    return list;
+  }
+
+  function generateCSV(dateFilter = 'all') {
+    const list = getFilteredExportTransactions(dateFilter);
 
     const headers = ['Date', 'Time', 'Type', 'Category', 'Member', 'Amount', 'Currency', 'Notes', 'Transaction_ID'];
     const rows = [headers.join(',')];
@@ -1797,17 +1904,19 @@
 
       const mem = getMemberInfo(tx.spentBy || 'adil');
       const txTypeLabel = tx.type === 'income' ? 'Income' : 'Expense';
+      const amtNum = Number(tx.amount) || 0;
+      const cleanDate = normalizeDateYMD(tx.date, tx.timestamp) || tx.date || '';
 
       const row = [
-        escapeCSV(tx.date),
-        escapeCSV(tx.time),
+        escapeCSV(cleanDate),
+        escapeCSV(tx.time || '12:00:00'),
         escapeCSV(txTypeLabel),
-        escapeCSV(tx.categoryName),
+        escapeCSV(tx.categoryName || ''),
         escapeCSV(mem.name),
-        tx.amount.toFixed(2),
+        amtNum.toFixed(2),
         escapeCSV(tx.currency || settings.currency),
         escapeCSV(tx.notes || ''),
-        escapeCSV(tx.id)
+        escapeCSV(tx.id || '')
       ];
       rows.push(row.join(','));
     });
@@ -1816,38 +1925,32 @@
   }
 
   async function handleExportCSV() {
-    const rangeSelect = document.getElementById('export-range-select');
-    const filter = rangeSelect ? rangeSelect.value : 'all';
-
-    const csvContent = generateCSV(filter);
-    if (!csvContent || transactions.length === 0) {
+    if (transactions.length === 0) {
       showToast('⚠️ No transactions to export');
       return;
     }
 
+    const rangeSelect = document.getElementById('export-range-select');
+    let filter = rangeSelect ? rangeSelect.value : 'all';
+    let filteredList = getFilteredExportTransactions(filter);
+
+    if (filteredList.length === 0 && filter !== 'all') {
+      if (confirm(`No transactions match the selected timeframe (${filter === 'this_month' ? 'This Cycle' : 'Previous Cycle'}). Would you like to export all ${transactions.length} transactions instead?`)) {
+        filter = 'all';
+        if (rangeSelect) rangeSelect.value = 'all';
+        updateCSVPreview();
+        filteredList = getFilteredExportTransactions('all');
+      } else {
+        return;
+      }
+    }
+
+    const csvContent = generateCSV(filter);
     const todayStr = formatDateYMD(new Date());
     const filename = `paragon_${filter}_${todayStr}.csv`;
 
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-
-    if (navigator.canShare && navigator.canShare({ files: [new File([blob], filename, { type: 'text/csv' })] })) {
-      try {
-        const file = new File([blob], filename, { type: 'text/csv' });
-        await navigator.share({
-          title: 'Paragon Household Export',
-          text: `Paragon household transactions export (${filename})`,
-          files: [file]
-        });
-        showToast('✅ Export shared successfully!');
-        return;
-      } catch (err) {
-        if (err.name !== 'AbortError') {
-          console.warn('Web Share failed, falling back to download:', err);
-        } else {
-          return;
-        }
-      }
-    }
+    // Prepend UTF-8 BOM (\uFEFF) so Excel, Numbers, and Google Sheets open all rows accurately
+    const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
 
     const link = document.createElement('a');
     const url = URL.createObjectURL(blob);
@@ -1857,9 +1960,9 @@
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
 
-    showToast(`✅ CSV Export downloaded: ${filename}`);
+    showToast(`✅ Exported ${filteredList.length} transactions to ${filename}`);
   }
 
   function updateCSVPreview() {
@@ -1871,15 +1974,7 @@
     const rangeSelect = document.getElementById('export-range-select');
     const filter = rangeSelect ? rangeSelect.value : 'all';
 
-    let list = [...transactions];
-    const currentCycle = getCyclePeriod(0);
-    const prevCycle = getCyclePeriod(-1);
-
-    if (filter === 'this_month') {
-      list = list.filter(t => currentCycle.isInCycle(t.date));
-    } else if (filter === 'prev_month') {
-      list = list.filter(t => prevCycle.isInCycle(t.date));
-    }
+    const list = getFilteredExportTransactions(filter).slice().reverse();
 
     const countEl = document.getElementById('export-count-badge');
     const totalEl = document.getElementById('export-total-badge');
@@ -2089,18 +2184,7 @@
 
           // Parse Date
           let rawDate = row[colMap.date] || '';
-          let dateYMD = formatDateYMD(new Date());
-          if (rawDate) {
-            const cleanDate = rawDate.trim().replace(/\//g, '-').replace(/\./g, '-');
-            const parts = cleanDate.split('-');
-            if (parts.length === 3) {
-              if (parts[0].length === 4) {
-                dateYMD = `${parts[0]}-${String(parts[1]).padStart(2, '0')}-${String(parts[2]).padStart(2, '0')}`;
-              } else if (parts[2].length === 4) {
-                dateYMD = `${parts[2]}-${String(parts[1]).padStart(2, '0')}-${String(parts[0]).padStart(2, '0')}`;
-              }
-            }
-          }
+          let dateYMD = normalizeDateYMD(rawDate) || formatDateYMD(new Date());
 
           // Parse Time
           let rawTime = row[colMap.time] || '';
@@ -2722,29 +2806,42 @@
   function openCycleSettingsModal() {
     const modal = document.getElementById('cycle-settings-modal');
     const dateInput = document.getElementById('cycle-start-date-input');
+    const endInput = document.getElementById('cycle-end-date-input');
     if (!modal || !dateInput) return;
 
     const currentCycle = getCyclePeriod(0);
     dateInput.value = currentCycle.startYMD;
-    updateCycleModalPreview(currentCycle.startYMD);
+    if (endInput) endInput.value = currentCycle.endYMD;
+    updateCycleModalPreview(currentCycle.startYMD, currentCycle.endYMD);
     modal.classList.add('active');
   }
 
-  function updateCycleModalPreview(dateStr) {
+  function updateCycleModalPreview(dateStr, customEndStr = null, autoComputeEnd = false) {
     const previewRangeEl = document.getElementById('cycle-preview-range');
     const previewLabelEl = document.getElementById('cycle-preview-label');
+    const endInput = document.getElementById('cycle-end-date-input');
 
     if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return;
 
     const parts = dateStr.split('-').map(n => parseInt(n, 10));
     const day = parts[2] || 1;
-    const previewCycle = getCyclePeriod(0, dateStr, day);
+
+    // If start date changed, compute default 1-month end date
+    if (autoComputeEnd && endInput) {
+      const defaultCycle = getCyclePeriod(0, dateStr, day, '');
+      endInput.value = defaultCycle.endYMD;
+      customEndStr = defaultCycle.endYMD;
+    } else if (customEndStr === null && endInput) {
+      customEndStr = endInput.value || '';
+    }
+
+    const previewCycle = getCyclePeriod(0, dateStr, day, customEndStr || '');
 
     if (previewRangeEl) {
       previewRangeEl.textContent = previewCycle.fullRangeLabel;
     }
     if (previewLabelEl) {
-      previewLabelEl.textContent = `${previewCycle.title} • Starts on the ${getOrdinalSuffix(previewCycle.startDay)} of each month`;
+      previewLabelEl.textContent = `${previewCycle.title} • Evaluates Parents' Household Fund & Monthly Budgets in this range`;
     }
 
     document.querySelectorAll('#cycle-quick-day-chips .chip-btn').forEach(btn => {
@@ -2771,13 +2868,15 @@
     if (dateInput) {
       dateInput.value = ymd;
     }
-    updateCycleModalPreview(ymd);
+    updateCycleModalPreview(ymd, null, true);
     triggerHaptic();
   }
 
   function saveCycleSettings() {
     const dateInput = document.getElementById('cycle-start-date-input');
+    const endInput = document.getElementById('cycle-end-date-input');
     const val = (dateInput?.value || '').trim();
+    const endVal = (endInput?.value || '').trim();
     if (!val || !/^\d{4}-\d{2}-\d{2}$/.test(val)) {
       showToast('⚠️ Please select a valid cycle start date');
       dateInput?.focus();
@@ -2787,19 +2886,10 @@
     const parts = val.split('-').map(n => parseInt(n, 10));
     const pickedDay = Math.min(31, Math.max(1, parts[2] || 1));
 
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const anchorStart = new Date(parts[0], parts[1] - 1, parts[2]);
-    const nextAnchorStart = createClampedDate(parts[0], parts[1], parts[2]);
-    const anchorEnd = new Date(nextAnchorStart.getFullYear(), nextAnchorStart.getMonth(), nextAnchorStart.getDate() - 1);
-
-    // If the user picked a cycle that contains today, allow automatic monthly rollover on pickedDay.
-    // If they picked a custom past/future cycle outside today, lock to that custom start date.
-    const containsToday = (today >= anchorStart && today <= anchorEnd);
-
     settings.cycleStartDay = pickedDay;
     settings.cycleStartDate = val;
-    settings.cycleLockedCustom = !containsToday;
+    settings.cycleEndDate = (endVal && /^\d{4}-\d{2}-\d{2}$/.test(endVal) && endVal >= val) ? endVal : '';
+    settings.cycleLockedCustom = true;
 
     saveSettings();
     updateAnalytics();
@@ -2809,7 +2899,7 @@
     triggerHaptic();
 
     const activeCycle = getCyclePeriod(0);
-    showToast(`✅ Budget cycle set to ${activeCycle.rangeLabel} (${activeCycle.title})`);
+    showToast(`✅ Timeframe set to ${activeCycle.rangeLabel} (${activeCycle.title})`);
   }
 
   function closeCycleSettingsModal() {
@@ -2870,11 +2960,12 @@
     if (!badge) return;
 
     const currentCycle = getCyclePeriod(0);
-    const thisMonthExpenses = transactions.filter(t => (t.type || 'expense') === 'expense' && currentCycle.isInCycle(t.date));
+    const cycleTxs = transactions.filter(t => currentCycle.isInCycle(t.date || t.timestamp));
+    const thisMonthExpenses = cycleTxs.filter(t => (t.type || 'expense') === 'expense');
     const monthSpent = thisMonthExpenses.reduce((s, t) => s + t.amount, 0);
 
-    const totalInc = transactions.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
-    const totalExp = transactions.filter(t => (t.type || 'expense') === 'expense').reduce((s, t) => s + t.amount, 0);
+    const totalInc = cycleTxs.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
+    const totalExp = monthSpent;
     const fundBalance = totalInc - totalExp;
 
     const monthName = currentCycle.shortMonthName;
@@ -3397,12 +3488,21 @@
 
     // Configurable Month Start Date (Budget Cycle) Modal Events
     document.getElementById('btn-open-cycle-settings')?.addEventListener('click', openCycleSettingsModal);
+    document.getElementById('btn-fund-open-cycle-settings')?.addEventListener('click', openCycleSettingsModal);
     document.getElementById('btn-settings-open-cycle')?.addEventListener('click', openCycleSettingsModal);
     document.getElementById('cycle-start-date-input')?.addEventListener('input', (e) => {
-      updateCycleModalPreview(e.target.value);
+      updateCycleModalPreview(e.target.value, null, true);
     });
     document.getElementById('cycle-start-date-input')?.addEventListener('change', (e) => {
-      updateCycleModalPreview(e.target.value);
+      updateCycleModalPreview(e.target.value, null, true);
+    });
+    document.getElementById('cycle-end-date-input')?.addEventListener('input', (e) => {
+      const startVal = document.getElementById('cycle-start-date-input')?.value || '';
+      updateCycleModalPreview(startVal, e.target.value, false);
+    });
+    document.getElementById('cycle-end-date-input')?.addEventListener('change', (e) => {
+      const startVal = document.getElementById('cycle-start-date-input')?.value || '';
+      updateCycleModalPreview(startVal, e.target.value, false);
     });
     document.getElementById('cycle-quick-day-chips')?.addEventListener('click', (e) => {
       const chip = e.target.closest('.chip-btn[data-cycle-day]');
