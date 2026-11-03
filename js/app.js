@@ -221,6 +221,7 @@
   let firestoreUnsubscribe = null;
   let firestoreBudgetsUnsubscribe = null;
   let firestoreCategoriesUnsubscribe = null;
+  let firestoreCycleUnsubscribe = null;
   let isSyncingFromCloud = false;
   let cloudSyncStatus = 'offline';
 
@@ -230,7 +231,10 @@
     theme: 'dark',
     budgets: Object.assign({}, DEFAULT_BUDGETS),
     pushNotifications: false,
-    householdId: DEFAULT_HOUSEHOLD_ID
+    householdId: DEFAULT_HOUSEHOLD_ID,
+    cycleStartDay: 1,
+    cycleStartDate: '',
+    cycleLockedCustom: false
   };
 
   // --- Category Helpers ---
@@ -444,7 +448,9 @@
       console.error('Error loading settings', e);
     }
     settings.householdId = DEFAULT_HOUSEHOLD_ID;
+    settings.cycleStartDay = Math.min(31, Math.max(1, parseInt(settings.cycleStartDay, 10) || 1));
     updateCurrencyDisplay();
+    updateCycleSettingsSubtitle();
   }
 
   function saveSettings(skipCloudSync = false) {
@@ -454,8 +460,137 @@
       console.error('Error saving settings', e);
     }
     updateCurrencyDisplay();
+    updateCycleSettingsSubtitle();
     if (!skipCloudSync && db) {
       uploadBudgetsToCloud(settings.budgets);
+      uploadCycleToCloud();
+    }
+  }
+
+  // ==========================================================================
+  // CONFIGURABLE MONTHLY BUDGET & ANALYTICS CYCLE HELPERS
+  // ==========================================================================
+
+  function createClampedDate(year, monthIndex, day) {
+    const maxDay = new Date(year, monthIndex + 1, 0).getDate();
+    return new Date(year, monthIndex, Math.min(Math.max(1, day), maxDay));
+  }
+
+  function getOrdinalSuffix(n) {
+    const s = ['th', 'st', 'nd', 'rd'];
+    const v = n % 100;
+    return n + (s[(v - 20) % 10] || s[v] || s[0]);
+  }
+
+  /**
+   * Computes the active or offset monthly expenditure cycle period.
+   * For example, if cycleStartDay is 23 (or cycleStartDate is '2026-10-23'),
+   * the cycle runs from 23 Oct 2026 to 22 Nov 2026 ("November 2026 Budget").
+   */
+  function getCyclePeriod(offsetMonths = 0, customStartDateStr = null, customStartDay = null) {
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+    const activeDateStr = customStartDateStr !== null ? customStartDateStr : (settings.cycleStartDate || '');
+    const activeDay = customStartDay !== null
+      ? Math.min(31, Math.max(1, parseInt(customStartDay, 10) || 1))
+      : Math.min(31, Math.max(1, parseInt(settings.cycleStartDay, 10) || 1));
+
+    let baseStartYear = today.getFullYear();
+    let baseStartMonth = today.getMonth();
+    let startDay = activeDay;
+
+    // If an explicit custom date is provided (either in preview or locked custom cycle),
+    // or if the saved cycleStartDate contains today, anchor from it.
+    let usedExplicitAnchor = false;
+    if (activeDateStr && /^\d{4}-\d{2}-\d{2}$/.test(activeDateStr)) {
+      const parts = activeDateStr.split('-').map(n => parseInt(n, 10));
+      const anchorStart = new Date(parts[0], parts[1] - 1, parts[2]);
+      const nextAnchorStart = createClampedDate(parts[0], parts[1], parts[2]);
+      const anchorEnd = new Date(nextAnchorStart.getFullYear(), nextAnchorStart.getMonth(), nextAnchorStart.getDate() - 1);
+
+      if (customStartDateStr !== null || settings.cycleLockedCustom || (today >= anchorStart && today <= anchorEnd)) {
+        baseStartYear = parts[0];
+        baseStartMonth = parts[1] - 1;
+        startDay = parts[2];
+        usedExplicitAnchor = true;
+      }
+    }
+
+    if (!usedExplicitAnchor) {
+      // Automatically compute current cycle containing today based on recurring startDay
+      const clampedThisMonthStart = createClampedDate(today.getFullYear(), today.getMonth(), startDay);
+      if (today >= clampedThisMonthStart) {
+        baseStartYear = today.getFullYear();
+        baseStartMonth = today.getMonth();
+      } else {
+        baseStartYear = today.getFullYear();
+        baseStartMonth = today.getMonth() - 1;
+      }
+    }
+
+    const targetMonthIndex = baseStartMonth + offsetMonths;
+    const cycleStart = createClampedDate(baseStartYear, targetMonthIndex, startDay);
+    const nextCycleStart = createClampedDate(baseStartYear, targetMonthIndex + 1, startDay);
+    const cycleEnd = new Date(nextCycleStart.getFullYear(), nextCycleStart.getMonth(), nextCycleStart.getDate() - 1);
+
+    const startYMD = formatDateYMD(cycleStart);
+    const endYMD = formatDateYMD(cycleEnd);
+
+    // Determine primary month name for this expenditure cycle:
+    // If cycle starts on or after the 15th (e.g., 23-Oct to 22-Nov), it represents the upcoming month (November).
+    // Otherwise (e.g., 1-Nov to 30-Nov), it represents the start month (November).
+    const labelRefDate = cycleStart.getDate() >= 15 ? cycleEnd : cycleStart;
+    const monthYearName = labelRefDate.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+    const shortMonthName = labelRefDate.toLocaleDateString(undefined, { month: 'short' });
+
+    const fmtShort = (d) => d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+    const fmtFull = (d) => d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+
+    const rangeLabel = `${fmtShort(cycleStart)} – ${fmtShort(cycleEnd)}`;
+    const fullRangeLabel = `${fmtFull(cycleStart)} – ${fmtFull(cycleEnd)}`;
+
+    const totalDays = Math.max(1, Math.round((cycleEnd - cycleStart) / 86400000) + 1);
+    let daysElapsed = totalDays;
+    if (today < cycleStart) {
+      daysElapsed = 1;
+    } else if (today <= cycleEnd) {
+      daysElapsed = Math.max(1, Math.round((today - cycleStart) / 86400000) + 1);
+    }
+
+    return {
+      startDate: cycleStart,
+      endDate: cycleEnd,
+      startYMD,
+      endYMD,
+      startDay: cycleStart.getDate(),
+      monthYearName,
+      shortMonthName,
+      title: `${monthYearName} Budget`,
+      rangeLabel,
+      fullRangeLabel,
+      cycleKey: `${startYMD}_${endYMD}`,
+      totalDays,
+      daysElapsed,
+      isInCycle: (dateYMD) => Boolean(dateYMD && dateYMD >= startYMD && dateYMD <= endYMD)
+    };
+  }
+
+  function updateCycleSettingsSubtitle() {
+    const cycle = getCyclePeriod(0);
+    const subEl = document.getElementById('settings-cycle-sub');
+    if (subEl) {
+      subEl.textContent = `Starts on ${getOrdinalSuffix(cycle.startDay)} (${cycle.rangeLabel})`;
+    }
+    const pillTextEl = document.getElementById('analytics-cycle-range-text');
+    if (pillTextEl) {
+      pillTextEl.textContent = cycle.rangeLabel;
+    }
+    const exportSelect = document.getElementById('export-range-select');
+    if (exportSelect && exportSelect.options.length >= 3) {
+      const prevCycle = getCyclePeriod(-1);
+      exportSelect.options[0].textContent = `This Cycle (${cycle.rangeLabel})`;
+      exportSelect.options[1].textContent = `Previous Cycle (${prevCycle.rangeLabel})`;
     }
   }
 
@@ -653,6 +788,25 @@
     }, (err) => {
       console.warn('Firestore categories snapshot error:', err);
     });
+
+    // 4. Listen for shared monthly cycle start date configuration
+    const cycleDoc = db.collection('households').doc(householdId).collection('settings').doc('cycle');
+    firestoreCycleUnsubscribe = cycleDoc.onSnapshot((doc) => {
+      if (doc.exists) {
+        const data = doc.data();
+        if (data && data.cycleStartDay) {
+          settings.cycleStartDay = Math.min(31, Math.max(1, parseInt(data.cycleStartDay, 10) || 1));
+          settings.cycleStartDate = data.cycleStartDate || '';
+          settings.cycleLockedCustom = Boolean(data.cycleLockedCustom);
+          saveSettings(true);
+          updateAnalytics();
+          updateCSVPreview();
+          updateMonthSummaryBadge();
+        }
+      }
+    }, (err) => {
+      console.warn('Firestore cycle snapshot error:', err);
+    });
   }
 
   function uploadTransactionToCloud(tx) {
@@ -708,6 +862,17 @@
       items: catList,
       updatedAt: Date.now()
     }).catch((err) => console.warn('Firestore custom categories upload error:', err));
+  }
+
+  function uploadCycleToCloud() {
+    if (!db) return;
+    const householdId = DEFAULT_HOUSEHOLD_ID;
+    db.collection('households').doc(householdId).collection('settings').doc('cycle').set({
+      cycleStartDay: settings.cycleStartDay || 1,
+      cycleStartDate: settings.cycleStartDate || '',
+      cycleLockedCustom: Boolean(settings.cycleLockedCustom),
+      updatedAt: Date.now()
+    }).catch((err) => console.warn('Firestore cycle upload error:', err));
   }
 
   function uploadAllLocalTransactionsToCloud() {
@@ -1069,10 +1234,9 @@
     const txType = selectedTxType === 'income' ? 'income' : 'expense';
 
     // Calculate current category spend before adding if it's an expense
-    const now = new Date();
-    const currentMonthPrefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const currentCycle = getCyclePeriod(0);
     const oldSpent = transactions
-      .filter(t => (t.type || 'expense') === 'expense' && t.categoryId === categoryObj.id && t.date && t.date.startsWith(currentMonthPrefix))
+      .filter(t => (t.type || 'expense') === 'expense' && t.categoryId === categoryObj.id && currentCycle.isInCycle(t.date))
       .reduce((sum, t) => sum + t.amount, 0);
 
     const newTransaction = {
@@ -1099,8 +1263,8 @@
       uploadTransactionToCloud(newTransaction);
     }
 
-    // Check budget thresholds only for expenses in the current month
-    if (txType === 'expense' && newTransaction.date && newTransaction.date.startsWith(currentMonthPrefix)) {
+    // Check budget thresholds only for expenses in the current configured cycle
+    if (txType === 'expense' && currentCycle.isInCycle(newTransaction.date)) {
       const newSpent = oldSpent + newTransaction.amount;
       checkBudgetThresholds(categoryObj.id, oldSpent, newSpent);
     }
@@ -1278,9 +1442,8 @@
     const breakdownList = document.getElementById('analytics-breakdown-list');
     const alertsContainer = document.getElementById('budget-alerts-section');
 
-    const now = new Date();
-    const currentMonthPrefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    const monthName = now.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+    const currentCycle = getCyclePeriod(0);
+    updateCycleSettingsSubtitle();
 
     // --- 0. House Fund Overview (All-Time Incomes, Expenses, Net Balance & Sibling Breakdown) ---
     let allTimeIncome = 0;
@@ -1351,18 +1514,19 @@
       }).join('');
     }
 
-    // --- 1. Monthly Expense Budget Analytics ---
+    // --- 1. Monthly Expense Budget Analytics (Configurable Cycle Range) ---
     const overallTitle = document.getElementById('overall-budget-title');
-    if (overallTitle) overallTitle.textContent = `${monthName} Budget`;
+    if (overallTitle) overallTitle.textContent = currentCycle.title;
+    const cycleRangeText = document.getElementById('analytics-cycle-range-text');
+    if (cycleRangeText) cycleRangeText.textContent = currentCycle.rangeLabel;
 
-    const thisMonthAllTxs = transactions.filter(t => t.date && t.date.startsWith(currentMonthPrefix));
+    const thisMonthAllTxs = transactions.filter(t => currentCycle.isInCycle(t.date));
     const thisMonthExpenses = thisMonthAllTxs.filter(t => (t.type || 'expense') === 'expense');
     const totalSpend = thisMonthExpenses.reduce((sum, t) => sum + t.amount, 0);
 
     // Key metrics
     if (txCountEl) txCountEl.textContent = thisMonthAllTxs.length.toString();
-    const dayOfMonth = Math.max(1, now.getDate());
-    const dailyAvg = totalSpend / dayOfMonth;
+    const dailyAvg = totalSpend / Math.max(1, currentCycle.daysElapsed);
     if (dailyAvgEl) dailyAvgEl.textContent = `${settings.currency} ${formatNumber(dailyAvg)}`;
 
     // Calculate totals for all Expense categories (default + custom)
@@ -1610,15 +1774,13 @@
   function generateCSV(dateFilter = 'all') {
     let list = [...transactions];
 
-    const now = new Date();
-    const currentMonthPrefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    const prevMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    const prevMonthPrefix = `${prevMonthDate.getFullYear()}-${String(prevMonthDate.getMonth() + 1).padStart(2, '0')}`;
+    const currentCycle = getCyclePeriod(0);
+    const prevCycle = getCyclePeriod(-1);
 
     if (dateFilter === 'this_month') {
-      list = list.filter(t => t.date && t.date.startsWith(currentMonthPrefix));
+      list = list.filter(t => currentCycle.isInCycle(t.date));
     } else if (dateFilter === 'prev_month') {
-      list = list.filter(t => t.date && t.date.startsWith(prevMonthPrefix));
+      list = list.filter(t => prevCycle.isInCycle(t.date));
     }
 
     list.sort((a, b) => a.timestamp - b.timestamp);
@@ -1704,19 +1866,19 @@
     const container = document.getElementById('csv-preview-container');
     if (!container) return;
 
+    updateCycleSettingsSubtitle();
+
     const rangeSelect = document.getElementById('export-range-select');
     const filter = rangeSelect ? rangeSelect.value : 'all';
 
     let list = [...transactions];
-    const now = new Date();
-    const currentMonthPrefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    const prevMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    const prevMonthPrefix = `${prevMonthDate.getFullYear()}-${String(prevMonthDate.getMonth() + 1).padStart(2, '0')}`;
+    const currentCycle = getCyclePeriod(0);
+    const prevCycle = getCyclePeriod(-1);
 
     if (filter === 'this_month') {
-      list = list.filter(t => t.date && t.date.startsWith(currentMonthPrefix));
+      list = list.filter(t => currentCycle.isInCycle(t.date));
     } else if (filter === 'prev_month') {
-      list = list.filter(t => t.date && t.date.startsWith(prevMonthPrefix));
+      list = list.filter(t => prevCycle.isInCycle(t.date));
     }
 
     const countEl = document.getElementById('export-count-badge');
@@ -2103,13 +2265,12 @@
     transactions.sort((a, b) => b.timestamp - a.timestamp);
     saveTransactions();
 
-    const now = new Date();
-    const currentMonthPrefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const currentCycle = getCyclePeriod(0);
     getExpenseCategories().forEach(cat => {
       const budget = Number(settings.budgets[cat.id]) || 0;
       if (budget > 0) {
         const catSpent = transactions
-          .filter(t => (t.type || 'expense') === 'expense' && t.categoryId === cat.id && t.date && t.date.startsWith(currentMonthPrefix))
+          .filter(t => (t.type || 'expense') === 'expense' && t.categoryId === cat.id && currentCycle.isInCycle(t.date))
           .reduce((sum, t) => sum + t.amount, 0);
         checkBudgetThresholds(cat.id, 0, catSpent);
       }
@@ -2253,11 +2414,10 @@
     closeEditModal();
     showToast('Transaction updated');
 
-    const now = new Date();
-    const currentMonthPrefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    if (editSelectedType === 'expense' && dVal && dVal.startsWith(currentMonthPrefix)) {
+    const currentCycle = getCyclePeriod(0);
+    if (editSelectedType === 'expense' && currentCycle.isInCycle(dVal)) {
       const catSpent = transactions
-        .filter(t => (t.type || 'expense') === 'expense' && t.categoryId === catObj.id && t.date && t.date.startsWith(currentMonthPrefix))
+        .filter(t => (t.type || 'expense') === 'expense' && t.categoryId === catObj.id && currentCycle.isInCycle(t.date))
         .reduce((sum, t) => sum + t.amount, 0);
       checkBudgetThresholds(catObj.id, 0, catSpent);
     }
@@ -2310,8 +2470,8 @@
     const categoryObj = getExpenseCategories().find(c => c.id === categoryId);
     if (!categoryObj) return;
 
-    const now = new Date();
-    const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const currentCycle = getCyclePeriod(0);
+    const currentMonthKey = currentCycle.cycleKey;
     const oldPct = (oldSpent / budget) * 100;
     const newPct = (newSpent / budget) * 100;
 
@@ -2443,15 +2603,14 @@
     if (!modal || !list) return;
 
     let currentTotal = 0;
-    const now = new Date();
-    const currentMonthPrefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const currentCycle = getCyclePeriod(0);
 
     list.innerHTML = getExpenseCategories().map(cat => {
       const bVal = Number(settings.budgets[cat.id]) || 0;
       currentTotal += bVal;
 
       const catSpent = transactions
-        .filter(t => (t.type || 'expense') === 'expense' && t.categoryId === cat.id && t.date && t.date.startsWith(currentMonthPrefix))
+        .filter(t => (t.type || 'expense') === 'expense' && t.categoryId === cat.id && currentCycle.isInCycle(t.date))
         .reduce((sum, t) => sum + t.amount, 0);
 
       return `
@@ -2527,14 +2686,13 @@
     title.textContent = `Budget: ${catObj.name}`;
     desc.textContent = `Set monthly budget limit for ${catObj.name}. Alerts trigger at 50%, 75%, 90%, and 100%.`;
 
-    const now = new Date();
-    const currentMonthPrefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const currentCycle = getCyclePeriod(0);
     const catSpent = transactions
-      .filter(t => (t.type || 'expense') === 'expense' && t.categoryId === categoryId && t.date && t.date.startsWith(currentMonthPrefix))
+      .filter(t => (t.type || 'expense') === 'expense' && t.categoryId === categoryId && currentCycle.isInCycle(t.date))
       .reduce((sum, t) => sum + t.amount, 0);
 
     input.value = settings.budgets[categoryId] || 0;
-    if (spendEl) spendEl.textContent = `Spent this month: ${settings.currency} ${formatNumber(catSpent)}`;
+    if (spendEl) spendEl.textContent = `Spent this cycle (${currentCycle.rangeLabel}): ${settings.currency} ${formatNumber(catSpent)}`;
 
     modal.classList.add('active');
     setTimeout(() => input.focus(), 150);
@@ -2558,6 +2716,104 @@
   function closeQuickBudgetModal() {
     editingBudgetId = null;
     document.getElementById('quick-budget-modal')?.classList.remove('active');
+  }
+
+  // --- Configurable Month Start Date (Budget Cycle) Modal ---
+  function openCycleSettingsModal() {
+    const modal = document.getElementById('cycle-settings-modal');
+    const dateInput = document.getElementById('cycle-start-date-input');
+    if (!modal || !dateInput) return;
+
+    const currentCycle = getCyclePeriod(0);
+    dateInput.value = currentCycle.startYMD;
+    updateCycleModalPreview(currentCycle.startYMD);
+    modal.classList.add('active');
+  }
+
+  function updateCycleModalPreview(dateStr) {
+    const previewRangeEl = document.getElementById('cycle-preview-range');
+    const previewLabelEl = document.getElementById('cycle-preview-label');
+
+    if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return;
+
+    const parts = dateStr.split('-').map(n => parseInt(n, 10));
+    const day = parts[2] || 1;
+    const previewCycle = getCyclePeriod(0, dateStr, day);
+
+    if (previewRangeEl) {
+      previewRangeEl.textContent = previewCycle.fullRangeLabel;
+    }
+    if (previewLabelEl) {
+      previewLabelEl.textContent = `${previewCycle.title} • Starts on the ${getOrdinalSuffix(previewCycle.startDay)} of each month`;
+    }
+
+    document.querySelectorAll('#cycle-quick-day-chips .chip-btn').forEach(btn => {
+      const chipDay = parseInt(btn.getAttribute('data-cycle-day'), 10);
+      btn.classList.toggle('active', chipDay === previewCycle.startDay);
+    });
+  }
+
+  function handleQuickCycleDaySelect(dayNum) {
+    const day = Math.min(31, Math.max(1, parseInt(dayNum, 10) || 1));
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const candidateThisMonth = createClampedDate(today.getFullYear(), today.getMonth(), day);
+
+    let startDateObj;
+    if (today >= candidateThisMonth) {
+      startDateObj = candidateThisMonth;
+    } else {
+      startDateObj = createClampedDate(today.getFullYear(), today.getMonth() - 1, day);
+    }
+
+    const ymd = formatDateYMD(startDateObj);
+    const dateInput = document.getElementById('cycle-start-date-input');
+    if (dateInput) {
+      dateInput.value = ymd;
+    }
+    updateCycleModalPreview(ymd);
+    triggerHaptic();
+  }
+
+  function saveCycleSettings() {
+    const dateInput = document.getElementById('cycle-start-date-input');
+    const val = (dateInput?.value || '').trim();
+    if (!val || !/^\d{4}-\d{2}-\d{2}$/.test(val)) {
+      showToast('⚠️ Please select a valid cycle start date');
+      dateInput?.focus();
+      return;
+    }
+
+    const parts = val.split('-').map(n => parseInt(n, 10));
+    const pickedDay = Math.min(31, Math.max(1, parts[2] || 1));
+
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const anchorStart = new Date(parts[0], parts[1] - 1, parts[2]);
+    const nextAnchorStart = createClampedDate(parts[0], parts[1], parts[2]);
+    const anchorEnd = new Date(nextAnchorStart.getFullYear(), nextAnchorStart.getMonth(), nextAnchorStart.getDate() - 1);
+
+    // If the user picked a cycle that contains today, allow automatic monthly rollover on pickedDay.
+    // If they picked a custom past/future cycle outside today, lock to that custom start date.
+    const containsToday = (today >= anchorStart && today <= anchorEnd);
+
+    settings.cycleStartDay = pickedDay;
+    settings.cycleStartDate = val;
+    settings.cycleLockedCustom = !containsToday;
+
+    saveSettings();
+    updateAnalytics();
+    updateCSVPreview();
+    updateMonthSummaryBadge();
+    closeCycleSettingsModal();
+    triggerHaptic();
+
+    const activeCycle = getCyclePeriod(0);
+    showToast(`✅ Budget cycle set to ${activeCycle.rangeLabel} (${activeCycle.title})`);
+  }
+
+  function closeCycleSettingsModal() {
+    document.getElementById('cycle-settings-modal')?.classList.remove('active');
   }
 
   // --- Push Notifications Settings Helper ---
@@ -2613,16 +2869,15 @@
     const badge = document.getElementById('header-month-badge');
     if (!badge) return;
 
-    const now = new Date();
-    const currentMonthPrefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    const thisMonthExpenses = transactions.filter(t => (t.type || 'expense') === 'expense' && t.date && t.date.startsWith(currentMonthPrefix));
+    const currentCycle = getCyclePeriod(0);
+    const thisMonthExpenses = transactions.filter(t => (t.type || 'expense') === 'expense' && currentCycle.isInCycle(t.date));
     const monthSpent = thisMonthExpenses.reduce((s, t) => s + t.amount, 0);
 
     const totalInc = transactions.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
     const totalExp = transactions.filter(t => (t.type || 'expense') === 'expense').reduce((s, t) => s + t.amount, 0);
     const fundBalance = totalInc - totalExp;
 
-    const monthName = now.toLocaleDateString(undefined, { month: 'short' });
+    const monthName = currentCycle.shortMonthName;
     if (totalInc > 0) {
       badge.textContent = `Fund: ${settings.currency} ${formatNumber(fundBalance)} • ${monthName}: ${formatNumber(monthSpent)}`;
     } else {
@@ -3050,7 +3305,8 @@
       uploadAllLocalTransactionsToCloud();
       uploadBudgetsToCloud(settings.budgets);
       uploadCustomCategoriesToCloud(customCategories);
-      showToast('☁️ Synced all transactions, budgets, and categories with Paragon Cloud!');
+      uploadCycleToCloud();
+      showToast('☁️ Synced all transactions, budgets, categories, and cycle dates with Paragon Cloud!');
     });
 
     // Transaction Action buttons (Edit & Delete delegation)
@@ -3137,6 +3393,27 @@
     document.getElementById('budget-modal-save-btn')?.addEventListener('click', saveAllBudgets);
     document.getElementById('budget-manager-modal')?.addEventListener('click', (e) => {
       if (e.target.id === 'budget-manager-modal') closeBudgetManagerModal();
+    });
+
+    // Configurable Month Start Date (Budget Cycle) Modal Events
+    document.getElementById('btn-open-cycle-settings')?.addEventListener('click', openCycleSettingsModal);
+    document.getElementById('btn-settings-open-cycle')?.addEventListener('click', openCycleSettingsModal);
+    document.getElementById('cycle-start-date-input')?.addEventListener('input', (e) => {
+      updateCycleModalPreview(e.target.value);
+    });
+    document.getElementById('cycle-start-date-input')?.addEventListener('change', (e) => {
+      updateCycleModalPreview(e.target.value);
+    });
+    document.getElementById('cycle-quick-day-chips')?.addEventListener('click', (e) => {
+      const chip = e.target.closest('.chip-btn[data-cycle-day]');
+      if (chip) {
+        handleQuickCycleDaySelect(chip.getAttribute('data-cycle-day'));
+      }
+    });
+    document.getElementById('cycle-modal-cancel-btn')?.addEventListener('click', closeCycleSettingsModal);
+    document.getElementById('cycle-modal-save-btn')?.addEventListener('click', saveCycleSettings);
+    document.getElementById('cycle-settings-modal')?.addEventListener('click', (e) => {
+      if (e.target.id === 'cycle-settings-modal') closeCycleSettingsModal();
     });
 
     // Single Category Quick Budget Modal Events

@@ -2221,4 +2221,58 @@ button:active {
   font-weight: 600;
 }
 
+/* ==========================================================================
+   Configurable Budget Cycle Pill & Preview Modal
+   ========================================================================== */
+
+.cycle-range-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 3px;
+  padding: 3px 9px;
+  border-radius: var(--radius-full);
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.28);
+  color: var(--primary);
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.cycle-range-pill:hover {
+  background: rgba(59, 130, 246, 0.2);
+  border-color: var(--primary);
+}
+
+.cycle-range-pill svg {
+  flex-shrink: 0;
+}
+
+.cycle-edit-hint {
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  padding-left: 4px;
+  border-left: 1px solid rgba(59, 130, 246, 0.28);
+  margin-left: 2px;
+}
+
+.cycle-preview-box {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  margin-bottom: 14px;
+}
+
+.chip-btn.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #ffffff;
+  box-shadow: 0 0 10px var(--primary-glow);
+}
+
+
 
