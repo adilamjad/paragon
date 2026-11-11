@@ -13,6 +13,8 @@
   const SETTINGS_KEY = 'paragon_settings_v1';
   const CUSTOM_CATEGORIES_KEY = 'paragon_custom_categories_v1';
   const ALERTS_KEY = 'paragon_alerted_thresholds_v1';
+  const DUE_DATES_KEY = 'paragon_due_dates_v1';
+  const DUE_ALERTED_KEY = 'paragon_due_alerted_v1';
   const PROFILE_STORAGE_KEY = 'paragon_device_profile_v1';
   const DEFAULT_HOUSEHOLD_ID = 'paragon_household';
 
@@ -180,7 +182,8 @@
     'plus': `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`,
     'check': `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`,
     'trash': `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`,
-    'edit': `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>`
+    'edit': `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>`,
+    'transfer': `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>`
   };
 
   // Pickable icons in Add Category Modal
@@ -193,22 +196,28 @@
   // --- Application State ---
   let transactions = [];
   let customCategories = [];
-  let selectedTxType = 'expense'; // 'expense' | 'income'
+  let selectedTxType = 'expense'; // 'expense' | 'income' | 'transfer'
   let selectedCategory = DEFAULT_EXPENSE_CATEGORIES[0].id;
+  let selectedPaidFrom = 'buffer'; // 'buffer' | 'faiza_wallet'
   let dateSelectionMode = 'now'; // 'now', 'yesterday', 'custom'
   let activeTab = 'tab-add';
   let historySearchQuery = '';
-  let historyTypeFilter = 'all'; // 'all', 'expense', 'income'
+  let historyTypeFilter = 'all'; // 'all', 'expense', 'income', 'transfer'
   let historyCategoryFilter = 'all';
   let historyMemberFilter = 'all'; // 'all', 'adil', 'faiza', 'haseeb'
   let deviceProfile = 'adil'; // active sibling using this device
   let selectedSpentBy = 'adil'; // sibling selected on add form
   let editSelectedSpentBy = 'adil'; // sibling selected in edit modal
   let editSelectedType = 'expense'; // transaction type in edit modal
+  let editSelectedPaidFrom = 'buffer'; // paidFrom in edit modal
   let lastDeletedTx = null;
   let editingTxId = null;
   let editingBudgetId = null;
   let alertedThresholds = {};
+  let dueDateItems = [];
+  let alertedDueKeys = {};
+  let dueModalPaidFrom = 'buffer';
+  let activePayingDueId = null;
   let stagedImportTransactions = [];
 
   // Custom Category Modal State
@@ -222,6 +231,7 @@
   let firestoreBudgetsUnsubscribe = null;
   let firestoreCategoriesUnsubscribe = null;
   let firestoreCycleUnsubscribe = null;
+  let firestoreDueDatesUnsubscribe = null;
   let isSyncingFromCloud = false;
   let cloudSyncStatus = 'offline';
 
@@ -275,6 +285,7 @@
   function init() {
     loadCustomCategories();
     loadSettings();
+    loadDueDates();
     loadDeviceProfile();
     loadTransactions();
     loadAlertedThresholds();
@@ -286,6 +297,7 @@
     updateDateSelectorUI();
     renderTransactionsHistory();
     updateAnalytics();
+    renderDueDatesUI();
     updateCSVPreview();
     updateMonthSummaryBadge();
     updateNotificationStatusUI();
@@ -300,6 +312,102 @@
     return FAMILY_MEMBERS.find(m => m.id === low || m.name.toLowerCase() === low) || FAMILY_MEMBERS[0];
   }
 
+  function getTxPaidFrom(tx) {
+    if (!tx) return 'buffer';
+    if (tx.type === 'transfer') return 'buffer';
+    if (tx.paidFrom === 'faiza_wallet' || tx.paidFrom === 'buffer') return tx.paidFrom;
+    const mem = getMemberInfo(tx.spentBy || 'adil');
+    return mem.id === 'faiza' ? 'faiza_wallet' : 'buffer';
+  }
+
+  /**
+   * Computes both cumulative running balances (all-time) for Buffer Account & Faiza's Wallet
+   * and current cycle totals so that carried-over funds are always accurately reflected.
+   */
+  function computeFundBalances(cycle) {
+    const activeCycle = cycle || getCyclePeriod(0);
+
+    let allTimeBufferIn = 0;
+    let allTimeBufferExp = 0;
+    let allTimeFaizaExp = 0;
+    let allTimeTransfers = 0;
+
+    let cycleIncome = 0;
+    let cycleExpense = 0;
+    let cycleBufferExp = 0;
+    let cycleFaizaExp = 0;
+    let cycleTransfers = 0;
+
+    const siblingStats = {};
+    FAMILY_MEMBERS.forEach(m => {
+      siblingStats[m.id] = {
+        member: m,
+        contributed: 0,
+        spent: 0,
+        transferred: 0,
+        allTimeContributed: 0,
+        allTimeSpent: 0
+      };
+    });
+
+    transactions.forEach(tx => {
+      if (!tx) return;
+      const amt = Number(tx.amount) || 0;
+      const tType = tx.type || 'expense';
+      const mem = getMemberInfo(tx.spentBy || 'adil');
+      const inCycle = activeCycle.isInCycle(tx.date || tx.timestamp);
+
+      if (tType === 'income') {
+        allTimeBufferIn += amt;
+        if (siblingStats[mem.id]) siblingStats[mem.id].allTimeContributed += amt;
+        if (inCycle) {
+          cycleIncome += amt;
+          if (siblingStats[mem.id]) siblingStats[mem.id].contributed += amt;
+        }
+      } else if (tType === 'transfer') {
+        allTimeTransfers += amt;
+        if (inCycle) {
+          cycleTransfers += amt;
+          if (siblingStats[mem.id]) siblingStats[mem.id].transferred += amt;
+        }
+      } else {
+        const paidFrom = getTxPaidFrom(tx);
+        if (paidFrom === 'faiza_wallet') {
+          allTimeFaizaExp += amt;
+          if (inCycle) cycleFaizaExp += amt;
+        } else {
+          allTimeBufferExp += amt;
+          if (inCycle) cycleBufferExp += amt;
+        }
+        if (siblingStats[mem.id]) siblingStats[mem.id].allTimeSpent += amt;
+        if (inCycle) {
+          cycleExpense += amt;
+          if (siblingStats[mem.id]) siblingStats[mem.id].spent += amt;
+        }
+      }
+    });
+
+    const bufferRunningBalance = allTimeBufferIn - allTimeBufferExp - allTimeTransfers;
+    const faizaWalletRunningBalance = allTimeTransfers - allTimeFaizaExp;
+    const netRunningBalance = bufferRunningBalance + faizaWalletRunningBalance;
+
+    return {
+      allTimeBufferIn,
+      allTimeBufferExp,
+      allTimeFaizaExp,
+      allTimeTransfers,
+      bufferRunningBalance,
+      faizaWalletRunningBalance,
+      netRunningBalance,
+      cycleIncome,
+      cycleExpense,
+      cycleBufferExp,
+      cycleFaizaExp,
+      cycleTransfers,
+      siblingStats
+    };
+  }
+
   function loadDeviceProfile() {
     try {
       const saved = localStorage.getItem(PROFILE_STORAGE_KEY);
@@ -308,6 +416,7 @@
       }
     } catch (e) {}
     selectedSpentBy = deviceProfile;
+    selectedPaidFrom = deviceProfile === 'faiza' ? 'faiza_wallet' : 'buffer';
     updateMemberSelectorsUI();
   }
 
@@ -315,6 +424,7 @@
     if (!FAMILY_MEMBERS.some(m => m.id === memberId)) return;
     deviceProfile = memberId;
     selectedSpentBy = memberId;
+    selectedPaidFrom = memberId === 'faiza' ? 'faiza_wallet' : 'buffer';
     try {
       localStorage.setItem(PROFILE_STORAGE_KEY, memberId);
     } catch (e) {}
@@ -327,6 +437,11 @@
     // Form member pills
     document.querySelectorAll('#form-member-selector .member-pill').forEach(btn => {
       btn.classList.toggle('active', btn.getAttribute('data-member') === selectedSpentBy);
+    });
+
+    // Form paid-from pills (Buffer Account vs Faiza's Wallet)
+    document.querySelectorAll('#form-paid-from-selector .member-pill').forEach(btn => {
+      btn.classList.toggle('active', btn.getAttribute('data-paid-from') === selectedPaidFrom);
     });
 
     // Settings profile pills
@@ -348,21 +463,57 @@
     document.querySelectorAll('#edit-member-selector .member-pill').forEach(btn => {
       btn.classList.toggle('active', btn.getAttribute('data-edit-member') === editSelectedSpentBy);
     });
+
+    // Edit modal paid-from pills
+    document.querySelectorAll('#edit-paid-from-selector .member-pill').forEach(btn => {
+      btn.classList.toggle('active', btn.getAttribute('data-edit-paid-from') === editSelectedPaidFrom);
+    });
   }
 
-  // --- Transaction Type UI (Expense vs Income / House Fund) ---
+  // --- Transaction Type UI (Expense vs Fund In vs Transfer to Faiza's Wallet) ---
   function setTransactionType(type) {
-    selectedTxType = type === 'income' ? 'income' : 'expense';
-    const activeCats = getActiveFormCategories();
-    if (!activeCats.some(c => c.id === selectedCategory)) {
-      selectedCategory = activeCats[0]?.id || 'rent';
+    if (type === 'income' || type === 'transfer') {
+      selectedTxType = type;
+    } else {
+      selectedTxType = 'expense';
+    }
+
+    if (selectedTxType === 'transfer' && selectedSpentBy === 'faiza') {
+      // Adil (or Haseeb) dispenses from Buffer Account to Faiza's Wallet
+      selectedSpentBy = 'adil';
+      updateMemberSelectorsUI();
+    } else if (selectedTxType === 'expense') {
+      selectedPaidFrom = selectedSpentBy === 'faiza' ? 'faiza_wallet' : 'buffer';
+      updateMemberSelectorsUI();
+    }
+
+    if (selectedTxType !== 'transfer') {
+      const activeCats = getActiveFormCategories();
+      if (!activeCats.some(c => c.id === selectedCategory)) {
+        selectedCategory = activeCats[0]?.id || 'rent';
+      }
+      renderCategoriesGrid();
     }
     updateTxTypeUI();
-    renderCategoriesGrid();
+  }
+
+  function updateTransferFormBalancePreview() {
+    const bufferBalEl = document.getElementById('transfer-form-buffer-bal');
+    const faizaBalEl = document.getElementById('transfer-form-faiza-bal');
+    if (!bufferBalEl && !faizaBalEl) return;
+    const stats = computeFundBalances();
+    if (bufferBalEl) {
+      bufferBalEl.textContent = `Avail: ${settings.currency} ${formatNumber(stats.bufferRunningBalance)}`;
+    }
+    if (faizaBalEl) {
+      faizaBalEl.textContent = `Bal: ${settings.currency} ${formatNumber(stats.faizaWalletRunningBalance)}`;
+    }
   }
 
   function updateTxTypeUI() {
     const isIncome = selectedTxType === 'income';
+    const isTransfer = selectedTxType === 'transfer';
+    const isExpense = selectedTxType === 'expense';
 
     document.querySelectorAll('#tx-type-switcher .tx-type-btn').forEach(btn => {
       btn.classList.toggle('active', btn.getAttribute('data-type') === selectedTxType);
@@ -370,31 +521,66 @@
 
     const heroCard = document.getElementById('amount-hero-card');
     const heroLabel = document.getElementById('amount-hero-label');
+    const transferRouteCard = document.getElementById('transfer-route-card');
+    const catSectionHeader = document.getElementById('category-section-header');
+    const catGrid = document.getElementById('category-grid');
+    const paidFromGroup = document.getElementById('expense-paid-from-group');
     const catSectionTitle = document.getElementById('category-section-title');
     const memberLabelText = document.getElementById('form-member-label-text');
     const submitBtn = document.getElementById('save-expense-btn');
     const submitBtnText = document.getElementById('save-expense-btn-text');
     const notesInput = document.getElementById('notes-input');
 
-    if (heroCard) heroCard.classList.toggle('income-mode', isIncome);
+    if (heroCard) {
+      heroCard.classList.toggle('income-mode', isIncome);
+      heroCard.classList.toggle('transfer-mode', isTransfer);
+    }
     if (heroLabel) {
-      heroLabel.textContent = isIncome ? 'House Fund Contribution / Income' : 'Expenditure Amount';
+      heroLabel.textContent = isTransfer
+        ? "Transfer Amount to Faiza's Wallet"
+        : isIncome
+        ? 'Buffer Account Contribution / Fund In'
+        : 'Expenditure Amount';
+    }
+    if (transferRouteCard) {
+      transferRouteCard.style.display = isTransfer ? 'block' : 'none';
+      if (isTransfer) updateTransferFormBalancePreview();
+    }
+    if (catSectionHeader) {
+      catSectionHeader.style.display = isTransfer ? 'none' : 'flex';
+    }
+    if (catGrid) {
+      catGrid.style.display = isTransfer ? 'none' : 'grid';
+    }
+    if (paidFromGroup) {
+      paidFromGroup.style.display = isExpense ? 'flex' : 'none';
     }
     if (catSectionTitle) {
       catSectionTitle.textContent = isIncome ? 'Select Income Category' : 'Select Expense Category';
     }
     if (memberLabelText) {
-      memberLabelText.textContent = isIncome ? 'Contributed By' : 'Spent By';
+      memberLabelText.textContent = isTransfer
+        ? 'Transferred By'
+        : isIncome
+        ? 'Contributed By (into Buffer Account)'
+        : 'Spent By';
     }
     if (submitBtn) {
       submitBtn.classList.toggle('income-mode', isIncome);
+      submitBtn.classList.toggle('transfer-mode', isTransfer);
     }
     if (submitBtnText) {
-      submitBtnText.textContent = isIncome ? 'Add to House Fund' : 'Save Expenditure';
+      submitBtnText.textContent = isTransfer
+        ? "Transfer to Faiza's Wallet"
+        : isIncome
+        ? 'Add to Buffer Account'
+        : 'Save Expenditure';
     }
     if (notesInput) {
-      notesInput.placeholder = isIncome
-        ? 'e.g. Monthly house fund transfer, bonus contribution...'
+      notesInput.placeholder = isTransfer
+        ? 'e.g. Sent to Faiza for groceries & household expenses...'
+        : isIncome
+        ? 'e.g. Monthly house fund transfer to buffer account...'
         : 'e.g. Monthly house rent, staff salary, pharmacy, utility bill...';
     }
   }
@@ -728,6 +914,7 @@
     }
     renderTransactionsHistory();
     updateAnalytics();
+    renderDueDatesUI();
     updateCSVPreview();
     updateMonthSummaryBadge();
   }
@@ -823,6 +1010,7 @@
 
         renderTransactionsHistory();
         updateAnalytics();
+        renderDueDatesUI();
         updateCSVPreview();
         updateMonthSummaryBadge();
         updateCloudStatusUI('connected', 'Live Sync');
@@ -899,12 +1087,30 @@
           settings.cycleLockedCustom = Boolean(data.cycleLockedCustom);
           saveSettings(true);
           updateAnalytics();
+          renderDueDatesUI();
           updateCSVPreview();
           updateMonthSummaryBadge();
         }
       }
     }, (err) => {
       console.warn('Firestore cycle snapshot error:', err);
+    });
+
+    // 5. Listen for shared expenditure due dates & alerts
+    const dueDatesDoc = db.collection('households').doc(householdId).collection('settings').doc('dueDates');
+    firestoreDueDatesUnsubscribe = dueDatesDoc.onSnapshot((doc) => {
+      if (doc.exists) {
+        const data = doc.data();
+        if (data && Array.isArray(data.items)) {
+          dueDateItems = data.items;
+          saveDueDates(true);
+          renderDueDatesUI();
+        }
+      } else if (dueDateItems.length > 0) {
+        uploadDueDatesToCloud(dueDateItems);
+      }
+    }, (err) => {
+      console.warn('Firestore dueDates snapshot error:', err);
     });
   }
 
@@ -973,6 +1179,15 @@
       cycleLockedCustom: Boolean(settings.cycleLockedCustom),
       updatedAt: Date.now()
     }).catch((err) => console.warn('Firestore cycle upload error:', err));
+  }
+
+  function uploadDueDatesToCloud(list) {
+    if (!db) return;
+    const householdId = DEFAULT_HOUSEHOLD_ID;
+    db.collection('households').doc(householdId).collection('settings').doc('dueDates').set({
+      items: list || dueDateItems,
+      updatedAt: Date.now()
+    }).catch((err) => console.warn('Firestore dueDates upload error:', err));
   }
 
   function uploadAllLocalTransactionsToCloud() {
@@ -1217,6 +1432,15 @@
     const container = document.getElementById('filter-pills-container');
     if (!container) return;
 
+    if (historyTypeFilter === 'transfer') {
+      container.innerHTML = `
+        <button type="button" class="filter-chip active" data-cat="all">
+          🔄 All Buffer → Faiza Transfers
+        </button>
+      `;
+      return;
+    }
+
     let catsToShow = getAllCategories();
     if (historyTypeFilter === 'expense') {
       catsToShow = getExpenseCategories();
@@ -1313,7 +1537,7 @@
     triggerHaptic();
   }
 
-  // --- Add Transaction (Expense or Income) ---
+  // --- Add Transaction (Expense, Fund In, or Transfer to Faiza's Wallet) ---
   function handleAddExpense(e) {
     if (e) e.preventDefault();
 
@@ -1327,25 +1551,48 @@
       return;
     }
 
-    const activeCats = getActiveFormCategories();
-    const categoryObj = activeCats.find(c => c.id === selectedCategory) || activeCats[0];
     const timestampObj = getActiveTimestamp();
     const memInfo = getMemberInfo(selectedSpentBy || deviceProfile || 'adil');
-    const txType = selectedTxType === 'income' ? 'income' : 'expense';
+    const txType = (selectedTxType === 'income' || selectedTxType === 'transfer') ? selectedTxType : 'expense';
+
+    let categoryId = 'rent';
+    let categoryName = 'Rent';
+    let paidFrom = 'buffer';
+    let transferTo = '';
+
+    if (txType === 'transfer') {
+      categoryId = 'transfer-to-faiza';
+      categoryName = "Transfer to Faiza's Wallet";
+      paidFrom = 'buffer';
+      transferTo = 'faiza_wallet';
+    } else {
+      const activeCats = getActiveFormCategories();
+      const categoryObj = activeCats.find(c => c.id === selectedCategory) || activeCats[0];
+      categoryId = categoryObj.id;
+      categoryName = categoryObj.name;
+      paidFrom = txType === 'expense'
+        ? (selectedPaidFrom || (memInfo.id === 'faiza' ? 'faiza_wallet' : 'buffer'))
+        : 'buffer';
+    }
 
     // Calculate current category spend before adding if it's an expense
     const currentCycle = getCyclePeriod(0);
-    const oldSpent = transactions
-      .filter(t => (t.type || 'expense') === 'expense' && t.categoryId === categoryObj.id && currentCycle.isInCycle(t.date))
-      .reduce((sum, t) => sum + t.amount, 0);
+    const oldSpent = txType === 'expense'
+      ? transactions
+          .filter(t => (t.type || 'expense') === 'expense' && t.categoryId === categoryId && currentCycle.isInCycle(t.date))
+          .reduce((sum, t) => sum + t.amount, 0)
+      : 0;
 
     const newTransaction = {
       id: 'tx_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
       type: txType,
       amount: Math.round(amount * 100) / 100,
       currency: settings.currency,
-      categoryId: categoryObj.id,
-      categoryName: categoryObj.name,
+      categoryId: categoryId,
+      categoryName: categoryName,
+      paidFrom: paidFrom,
+      transferTo: transferTo,
+      paidDueId: activePayingDueId || '',
       spentBy: memInfo.id,
       spentByName: memInfo.name,
       spentByAvatar: memInfo.avatar,
@@ -1355,8 +1602,21 @@
       timestamp: timestampObj.getTime()
     };
 
+    // If user clicked "Pay Now" on a due date alert, mark that due item as paid for this month
+    if (txType === 'expense' && activePayingDueId) {
+      const dueItem = dueDateItems.find(d => d.id === activePayingDueId);
+      if (dueItem) {
+        const ymKey = newTransaction.date.slice(0, 7);
+        dueItem.paidPeriods = dueItem.paidPeriods || {};
+        dueItem.paidPeriods[ymKey] = true;
+        saveDueDates();
+      }
+      activePayingDueId = null;
+    }
+
     transactions.unshift(newTransaction);
     saveTransactions();
+    updateTransferFormBalancePreview();
 
     // Upload to Firebase Cloud
     if (db) {
@@ -1366,7 +1626,7 @@
     // Check budget thresholds only for expenses in the current configured cycle
     if (txType === 'expense' && currentCycle.isInCycle(newTransaction.date)) {
       const newSpent = oldSpent + newTransaction.amount;
-      checkBudgetThresholds(categoryObj.id, oldSpent, newSpent);
+      checkBudgetThresholds(categoryId, oldSpent, newSpent);
     }
 
     // Reset Form
@@ -1376,10 +1636,13 @@
     updateDateSelectorUI();
 
     triggerHaptic();
-    if (txType === 'income') {
-      showToast(`💰 ${memInfo.avatar} ${memInfo.name} added +${settings.currency} ${formatNumber(newTransaction.amount)} to House Fund`, true, newTransaction.id);
+    if (txType === 'transfer') {
+      showToast(`🔄 ${memInfo.avatar} ${memInfo.name} transferred ${settings.currency} ${formatNumber(newTransaction.amount)} to 👛 Faiza's Wallet`, true, newTransaction.id);
+    } else if (txType === 'income') {
+      showToast(`💰 ${memInfo.avatar} ${memInfo.name} added +${settings.currency} ${formatNumber(newTransaction.amount)} to 🏦 Buffer Account`, true, newTransaction.id);
     } else {
-      showToast(`✅ ${memInfo.avatar} ${memInfo.name} spent ${settings.currency} ${formatNumber(newTransaction.amount)} in ${categoryObj.name}`, true, newTransaction.id);
+      const sourceLabel = paidFrom === 'faiza_wallet' ? "👛 Faiza's Wallet" : '🏦 Buffer';
+      showToast(`✅ ${memInfo.avatar} ${memInfo.name} spent ${settings.currency} ${formatNumber(newTransaction.amount)} in ${categoryName} (${sourceLabel})`, true, newTransaction.id);
     }
   }
 
@@ -1390,13 +1653,13 @@
 
     let filtered = [...transactions];
 
-    // Filter by Transaction Type (All / Expense / Income)
+    // Filter by Transaction Type (All / Expense / Income / Transfer)
     if (historyTypeFilter !== 'all') {
       filtered = filtered.filter(tx => (tx.type || 'expense') === historyTypeFilter);
     }
 
     // Filter by Category
-    if (historyCategoryFilter !== 'all') {
+    if (historyCategoryFilter !== 'all' && historyTypeFilter !== 'transfer') {
       filtered = filtered.filter(tx => tx.categoryId === historyCategoryFilter);
     }
 
@@ -1421,7 +1684,7 @@
         <div class="empty-state">
           <div class="empty-icon">${ICONS['shopping-cart']}</div>
           <div class="empty-title">No transactions found</div>
-          <p class="empty-desc">Expenses and House Fund contributions you log will appear here with date, time, sibling, and notes.</p>
+          <p class="empty-desc">Expenses, Buffer Account contributions, and transfers to Faiza's Wallet will appear here.</p>
         </div>
       `;
       return;
@@ -1449,6 +1712,7 @@
       const dayTxs = groups[dateStr];
       const dayExp = dayTxs.filter(t => (t.type || 'expense') === 'expense').reduce((s, t) => s + t.amount, 0);
       const dayInc = dayTxs.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
+      const dayTrans = dayTxs.filter(t => t.type === 'transfer').reduce((s, t) => s + t.amount, 0);
 
       let dayTitle = dateStr;
       if (dateStr === todayYMD) {
@@ -1463,14 +1727,11 @@
         }
       }
 
-      let daySummaryHtml = '';
-      if (dayInc > 0 && dayExp > 0) {
-        daySummaryHtml = `<span style="color: var(--accent-green);">+${formatNumber(dayInc)}</span> • <span>-${formatNumber(dayExp)}</span>`;
-      } else if (dayInc > 0) {
-        daySummaryHtml = `<span style="color: var(--accent-green);">+${settings.currency} ${formatNumber(dayInc)}</span>`;
-      } else {
-        daySummaryHtml = `<span>${settings.currency} ${formatNumber(dayExp)}</span>`;
-      }
+      const summaryParts = [];
+      if (dayInc > 0) summaryParts.push(`<span style="color: var(--accent-green);">+${formatNumber(dayInc)}</span>`);
+      if (dayExp > 0) summaryParts.push(`<span>-${formatNumber(dayExp)}</span>`);
+      if (dayTrans > 0) summaryParts.push(`<span style="color: #a78bfa;">🔄 ${formatNumber(dayTrans)}</span>`);
+      const daySummaryHtml = summaryParts.join(' • ') || `<span>${settings.currency} 0.00</span>`;
 
       html += `
         <div class="history-group">
@@ -1481,15 +1742,33 @@
           <div class="transactions-list">
             ${dayTxs.map(tx => {
               const isInc = tx.type === 'income';
-              const cat = findCategoryById(tx.categoryId) || {
-                name: tx.categoryName || (isInc ? 'Income' : 'Expense'),
-                icon: isInc ? 'wallet' : 'home',
-                color: isInc ? '#10b981' : '#3b82f6',
-                bg: isInc ? 'rgba(16, 185, 129, 0.16)' : 'rgba(59, 130, 246, 0.15)'
-              };
+              const isTransfer = tx.type === 'transfer';
+
+              let cat;
+              if (isTransfer) {
+                cat = {
+                  name: "Buffer → Faiza's Wallet",
+                  icon: 'transfer',
+                  color: '#a78bfa',
+                  bg: 'rgba(139, 92, 246, 0.16)'
+                };
+              } else {
+                cat = findCategoryById(tx.categoryId) || {
+                  name: tx.categoryName || (isInc ? 'Income' : 'Expense'),
+                  icon: isInc ? 'wallet' : 'home',
+                  color: isInc ? '#10b981' : '#3b82f6',
+                  bg: isInc ? 'rgba(16, 185, 129, 0.16)' : 'rgba(59, 130, 246, 0.15)'
+                };
+              }
 
               const timeDisplay = formatTime12(tx.time);
               const mem = getMemberInfo(tx.spentBy || 'adil');
+              const paidFrom = getTxPaidFrom(tx);
+              const sourceBadgeHtml = (!isInc && !isTransfer)
+                ? (paidFrom === 'faiza_wallet'
+                    ? `<span class="tx-source-badge faiza">👛 Faiza's Wallet</span>`
+                    : `<span class="tx-source-badge buffer">🏦 Buffer</span>`)
+                : '';
 
               return `
                 <div class="transaction-card" data-id="${escapeHTML(tx.id)}">
@@ -1500,17 +1779,19 @@
                     <div class="tx-details">
                       <div class="tx-category-title">
                         ${escapeHTML(cat.name)}
-                        ${isInc ? `<span class="tx-type-badge income">Fund In</span>` : ''}
+                        ${isInc ? `<span class="tx-type-badge income">🏦 Fund In</span>` : ''}
+                        ${isTransfer ? `<span class="tx-type-badge transfer">🔄 To Faiza</span>` : ''}
                       </div>
                       ${tx.notes ? `<div class="tx-notes">${escapeHTML(tx.notes)}</div>` : ''}
                       <div class="tx-meta">
                         ${timeDisplay} • <span class="tx-member-pill member-${mem.id}">${mem.avatar} ${escapeHTML(mem.name)}</span>
+                        ${sourceBadgeHtml ? `• ${sourceBadgeHtml}` : ''}
                       </div>
                     </div>
                   </div>
                   <div class="tx-right">
-                    <div class="tx-amount ${isInc ? 'income-amount' : ''}">
-                      ${isInc ? '+' : ''}${settings.currency} ${formatNumber(tx.amount)}
+                    <div class="tx-amount ${isInc ? 'income-amount' : isTransfer ? 'transfer-amount' : ''}">
+                      ${isInc ? '+' : isTransfer ? '🔄 ' : ''}${settings.currency} ${formatNumber(tx.amount)}
                     </div>
                     <div class="tx-actions">
                       <button type="button" class="tx-action-btn edit" data-id="${escapeHTML(tx.id)}" title="Edit" aria-label="Edit transaction">
@@ -1544,32 +1825,60 @@
 
     const currentCycle = getCyclePeriod(0);
     updateCycleSettingsSubtitle();
+    updateTransferFormBalancePreview();
 
     // Filter transactions strictly by the chosen timeframe (currentCycle)
     const thisMonthAllTxs = transactions.filter(t => currentCycle.isInCycle(t.date || t.timestamp));
     const thisMonthExpenses = thisMonthAllTxs.filter(t => (t.type || 'expense') === 'expense');
     const totalSpend = thisMonthExpenses.reduce((sum, t) => sum + t.amount, 0);
 
-    // --- 0. House Fund Overview (Filtered by Chosen Timeframe: Incomes, Expenses, Net Balance & Sibling Breakdown) ---
-    let cycleIncome = 0;
-    let cycleExpense = 0;
-    const siblingStats = {};
-    FAMILY_MEMBERS.forEach(m => {
-      siblingStats[m.id] = { member: m, contributed: 0, spent: 0 };
-    });
+    // --- 0. House Fund Overview (Cumulative Running Balances + Chosen Timeframe Breakdown) ---
+    const fundStats = computeFundBalances(currentCycle);
+    const {
+      bufferRunningBalance,
+      faizaWalletRunningBalance,
+      netRunningBalance,
+      cycleIncome,
+      cycleExpense,
+      cycleBufferExp,
+      cycleFaizaExp,
+      cycleTransfers,
+      siblingStats
+    } = fundStats;
 
-    thisMonthAllTxs.forEach(tx => {
-      const mem = getMemberInfo(tx.spentBy || 'adil');
-      if (tx.type === 'income') {
-        cycleIncome += tx.amount;
-        if (siblingStats[mem.id]) siblingStats[mem.id].contributed += tx.amount;
-      } else {
-        cycleExpense += tx.amount;
-        if (siblingStats[mem.id]) siblingStats[mem.id].spent += tx.amount;
-      }
-    });
+    const bufferBalEl = document.getElementById('buffer-running-balance');
+    const bufferLinesEl = document.getElementById('buffer-breakdown-lines');
+    const faizaBalEl = document.getElementById('faiza-wallet-running-balance');
+    const faizaLinesEl = document.getElementById('faiza-wallet-breakdown-lines');
 
-    const netFundBalance = cycleIncome - cycleExpense;
+    if (bufferBalEl) {
+      bufferBalEl.textContent = bufferRunningBalance >= 0
+        ? `${settings.currency} ${formatNumber(bufferRunningBalance)}`
+        : `-${settings.currency} ${formatNumber(Math.abs(bufferRunningBalance))}`;
+      bufferBalEl.classList.toggle('negative', bufferRunningBalance < 0);
+    }
+    if (bufferLinesEl) {
+      bufferLinesEl.innerHTML = `
+        <div class="bucket-line"><span>Cycle In:</span><span class="val-pos">+${formatNumber(cycleIncome)}</span></div>
+        <div class="bucket-line"><span>Direct Bills:</span><span class="val-neg">-${formatNumber(cycleBufferExp)}</span></div>
+        <div class="bucket-line"><span>To Faiza:</span><span class="val-trans">-${formatNumber(cycleTransfers)}</span></div>
+      `;
+    }
+
+    if (faizaBalEl) {
+      faizaBalEl.textContent = faizaWalletRunningBalance >= 0
+        ? `${settings.currency} ${formatNumber(faizaWalletRunningBalance)}`
+        : `-${settings.currency} ${formatNumber(Math.abs(faizaWalletRunningBalance))}`;
+      faizaBalEl.classList.toggle('negative', faizaWalletRunningBalance < 0);
+    }
+    if (faizaLinesEl) {
+      faizaLinesEl.innerHTML = `
+        <div class="bucket-line"><span>Cycle Recv:</span><span class="val-trans">+${formatNumber(cycleTransfers)}</span></div>
+        <div class="bucket-line"><span>Cycle Spent:</span><span class="val-neg">-${formatNumber(cycleFaizaExp)}</span></div>
+        <div class="bucket-line"><span>All-Time Recv:</span><span>${formatNumber(fundStats.allTimeTransfers)}</span></div>
+      `;
+    }
+
     const fundIncomeEl = document.getElementById('fund-total-income');
     const fundSpentEl = document.getElementById('fund-total-spent');
     const fundBalanceEl = document.getElementById('fund-net-balance');
@@ -1581,20 +1890,20 @@
     if (fundIncomeEl) fundIncomeEl.textContent = `${settings.currency} ${formatNumber(cycleIncome)}`;
     if (fundSpentEl) fundSpentEl.textContent = `${settings.currency} ${formatNumber(cycleExpense)}`;
     if (fundBalanceEl) {
-      if (netFundBalance >= 0) {
-        fundBalanceEl.textContent = `${settings.currency} ${formatNumber(netFundBalance)}`;
+      if (netRunningBalance >= 0) {
+        fundBalanceEl.textContent = `${settings.currency} ${formatNumber(netRunningBalance)}`;
         fundBalanceEl.className = 'stat-val positive';
       } else {
-        fundBalanceEl.textContent = `-${settings.currency} ${formatNumber(Math.abs(netFundBalance))}`;
+        fundBalanceEl.textContent = `-${settings.currency} ${formatNumber(Math.abs(netRunningBalance))}`;
         fundBalanceEl.className = 'stat-val negative';
       }
     }
     if (fundStatusBadge) {
-      if (netFundBalance >= 0) {
-        fundStatusBadge.textContent = 'Surplus';
+      if (netRunningBalance >= 0) {
+        fundStatusBadge.textContent = 'Net Surplus';
         fundStatusBadge.className = 'fund-status-badge';
       } else {
-        fundStatusBadge.textContent = 'Deficit';
+        fundStatusBadge.textContent = 'Net Deficit';
         fundStatusBadge.className = 'fund-status-badge negative';
       }
     }
@@ -1609,13 +1918,19 @@
               <span>${escapeHTML(m.name)}</span>
             </div>
             <div class="sibling-fund-line">
-              <span>In:</span>
+              <span>Fund In:</span>
               <span style="color: var(--accent-green); font-weight: 700;">${formatNumber(st.contributed)}</span>
             </div>
             <div class="sibling-fund-line">
               <span>Spent:</span>
               <span style="color: var(--text-primary); font-weight: 700;">${formatNumber(st.spent)}</span>
             </div>
+            ${st.transferred > 0 ? `
+            <div class="sibling-fund-line">
+              <span>To Faiza:</span>
+              <span style="color: #a78bfa; font-weight: 700;">${formatNumber(st.transferred)}</span>
+            </div>
+            ` : ''}
           </div>
         `;
       }).join('');
@@ -1892,7 +2207,7 @@
   function generateCSV(dateFilter = 'all') {
     const list = getFilteredExportTransactions(dateFilter);
 
-    const headers = ['Date', 'Time', 'Type', 'Category', 'Member', 'Amount', 'Currency', 'Notes', 'Transaction_ID'];
+    const headers = ['Date', 'Time', 'Type', 'Account', 'Category', 'Member', 'Amount', 'Currency', 'Notes', 'Transaction_ID'];
     const rows = [headers.join(',')];
 
     list.forEach(tx => {
@@ -1903,7 +2218,18 @@
       };
 
       const mem = getMemberInfo(tx.spentBy || 'adil');
-      const txTypeLabel = tx.type === 'income' ? 'Income' : 'Expense';
+      const txTypeLabel = tx.type === 'income'
+        ? 'Income'
+        : tx.type === 'transfer'
+        ? 'Transfer'
+        : 'Expense';
+      const accountLabel = tx.type === 'income'
+        ? 'Buffer Account'
+        : tx.type === 'transfer'
+        ? "Buffer -> Faiza's Wallet"
+        : getTxPaidFrom(tx) === 'faiza_wallet'
+        ? "Faiza's Wallet"
+        : 'Buffer Account';
       const amtNum = Number(tx.amount) || 0;
       const cleanDate = normalizeDateYMD(tx.date, tx.timestamp) || tx.date || '';
 
@@ -1911,6 +2237,7 @@
         escapeCSV(cleanDate),
         escapeCSV(tx.time || '12:00:00'),
         escapeCSV(txTypeLabel),
+        escapeCSV(accountLabel),
         escapeCSV(tx.categoryName || ''),
         escapeCSV(mem.name),
         amtNum.toFixed(2),
@@ -1999,10 +2326,10 @@
           <tr>
             <th>Date</th>
             <th>Type</th>
+            <th>Account</th>
             <th>Category</th>
             <th>Member</th>
             <th>Amount</th>
-            <th>Notes</th>
           </tr>
         </thead>
         <tbody>
@@ -2011,14 +2338,22 @@
     previewItems.forEach(tx => {
       const mem = getMemberInfo(tx.spentBy || 'adil');
       const isInc = tx.type === 'income';
+      const isTrans = tx.type === 'transfer';
+      const acctShort = isInc
+        ? '🏦 Buffer'
+        : isTrans
+        ? '🔄 → Faiza'
+        : getTxPaidFrom(tx) === 'faiza_wallet'
+        ? '👛 Faiza'
+        : '🏦 Buffer';
       tableHtml += `
         <tr>
           <td>${escapeHTML(tx.date)}</td>
-          <td>${isInc ? 'Income' : 'Expense'}</td>
+          <td>${isInc ? 'Income' : isTrans ? 'Transfer' : 'Expense'}</td>
+          <td>${escapeHTML(acctShort)}</td>
           <td>${escapeHTML(tx.categoryName)}</td>
           <td>${escapeHTML(mem.name)}</td>
-          <td>${isInc ? '+' : ''}${formatNumber(tx.amount)}</td>
-          <td>${escapeHTML(tx.notes || '-')}</td>
+          <td>${isInc ? '+' : isTrans ? '🔄 ' : ''}${formatNumber(tx.amount)}</td>
         </tr>
       `;
     });
@@ -2148,6 +2483,7 @@
               if (cell.includes('date')) colMap.date = idx;
               else if (cell.includes('time')) colMap.time = idx;
               else if (cell.includes('type')) colMap.type = idx;
+              else if (cell.includes('account') || cell.includes('wallet') || cell.includes('bucket') || cell.includes('source')) colMap.account = idx;
               else if (cell.includes('cat')) colMap.category = idx;
               else if (cell.includes('spent') || cell.includes('member') || cell.includes('sibling') || cell.includes('user') || cell.includes('who') || cell.includes('person')) colMap.spentBy = idx;
               else if (cell.includes('amount') || cell.includes('spend') || cell.includes('cost') || cell.includes('total')) colMap.amount = idx;
@@ -2177,7 +2513,9 @@
           let txType = 'expense';
           if (colMap.type !== undefined && row[colMap.type]) {
             const rawT = String(row[colMap.type]).trim().toLowerCase();
-            if (rawT.includes('inc') || rawT.includes('fund') || rawT.includes('contrib') || rawT.includes('in')) {
+            if (rawT.includes('trans') || rawT.includes('to faiza')) {
+              txType = 'transfer';
+            } else if (rawT.includes('inc') || rawT.includes('fund') || rawT.includes('contrib') || rawT.includes('in')) {
               txType = 'income';
             }
           }
@@ -2197,13 +2535,41 @@
             timeHMS = `${hh}:${mm}:${ss}`;
           }
 
+          // Parse Sibling Member
+          let mem = getMemberInfo(deviceProfile || 'adil');
+          if (colMap.spentBy !== undefined && row[colMap.spentBy]) {
+            const rawM = String(row[colMap.spentBy]).trim().toLowerCase();
+            if (rawM.includes('faiza') || rawM.includes('sis')) mem = getMemberInfo('faiza');
+            else if (rawM.includes('haseeb')) mem = getMemberInfo('haseeb');
+            else if (rawM.includes('adil')) mem = getMemberInfo('adil');
+          }
+
+          // Parse Account / PaidFrom
+          let paidFrom = mem.id === 'faiza' ? 'faiza_wallet' : 'buffer';
+          if (colMap.account !== undefined && row[colMap.account]) {
+            const rawAcct = String(row[colMap.account]).trim().toLowerCase();
+            if (rawAcct.includes('->') || rawAcct.includes('transfer')) {
+              txType = 'transfer';
+              paidFrom = 'buffer';
+            } else if (rawAcct.includes('faiza') || rawAcct.includes('wallet')) {
+              paidFrom = 'faiza_wallet';
+            } else if (rawAcct.includes('buffer')) {
+              paidFrom = 'buffer';
+            }
+          }
+
           // Parse Category
           const rawCat = (row[colMap.category] || '').trim();
           let matchedCat = allCats.find(c => c.name.toLowerCase() === rawCat.toLowerCase());
 
-          if (!matchedCat && rawCat) {
+          if (txType === 'transfer') {
+            matchedCat = { id: 'transfer-to-faiza', name: "Transfer to Faiza's Wallet" };
+          } else if (!matchedCat && rawCat) {
             const low = rawCat.toLowerCase();
-            if (low.includes('rent') || low.includes('house')) matchedCat = findCategoryById('rent');
+            if (low.includes('transfer') && low.includes('faiza')) {
+              txType = 'transfer';
+              matchedCat = { id: 'transfer-to-faiza', name: "Transfer to Faiza's Wallet" };
+            } else if (low.includes('rent') || low.includes('house')) matchedCat = findCategoryById('rent');
             else if (low.includes('salar') || low.includes('staff') || low.includes('maid') || low.includes('driver')) matchedCat = findCategoryById('salaries');
             else if (low.includes('bill') || low.includes('electric') || low.includes('water') || low.includes('gas')) matchedCat = findCategoryById('bills');
             else if (low.includes('service') || low.includes('repair') || low.includes('maint')) matchedCat = findCategoryById('services');
@@ -2227,15 +2593,6 @@
             ? existingId
             : 'tx_imp_' + Date.now() + '_' + idx + '_' + Math.random().toString(36).substr(2, 4);
 
-          // Parse Sibling Member
-          let mem = getMemberInfo(deviceProfile || 'adil');
-          if (colMap.spentBy !== undefined && row[colMap.spentBy]) {
-            const rawM = String(row[colMap.spentBy]).trim().toLowerCase();
-            if (rawM.includes('faiza') || rawM.includes('sis')) mem = getMemberInfo('faiza');
-            else if (rawM.includes('haseeb')) mem = getMemberInfo('haseeb');
-            else if (rawM.includes('adil')) mem = getMemberInfo('adil');
-          }
-
           const dtObj = new Date(`${dateYMD}T${timeHMS}`);
           const timestamp = isNaN(dtObj.getTime()) ? Date.now() : dtObj.getTime();
 
@@ -2246,6 +2603,8 @@
             currency: (row[colMap.currency] || settings.currency).trim(),
             categoryId: matchedCat.id,
             categoryName: matchedCat.name,
+            paidFrom: txType === 'expense' ? paidFrom : 'buffer',
+            transferTo: txType === 'transfer' ? 'faiza_wallet' : '',
             spentBy: mem.id,
             spentByName: mem.name,
             spentByAvatar: mem.avatar,
@@ -2307,7 +2666,7 @@
       html += `
         <tr>
           <td>${escapeHTML(tx.date)}</td>
-          <td>${tx.type === 'income' ? 'Income' : 'Expense'}</td>
+          <td>${tx.type === 'income' ? 'Income' : tx.type === 'transfer' ? 'Transfer' : 'Expense'}</td>
           <td>${escapeHTML(tx.categoryName)}</td>
           <td>${escapeHTML(tx.spentByName)}</td>
           <td>${formatNumber(tx.amount)}</td>
@@ -2410,8 +2769,18 @@
 
   // --- Edit Transaction ---
   function populateEditCategorySelect(txType, selectedCatId) {
+    const categoryGroup = document.getElementById('edit-category-group');
+    const paidFromGroup = document.getElementById('edit-paid-from-group');
     const categorySelect = document.getElementById('edit-category-select');
-    if (!categorySelect) return;
+
+    if (categoryGroup) {
+      categoryGroup.style.display = txType === 'transfer' ? 'none' : 'flex';
+    }
+    if (paidFromGroup) {
+      paidFromGroup.style.display = txType === 'expense' ? 'flex' : 'none';
+    }
+    if (!categorySelect || txType === 'transfer') return;
+
     const list = txType === 'income' ? getIncomeCategories() : getExpenseCategories();
     categorySelect.innerHTML = list.map(c => `
       <option value="${escapeHTML(c.id)}" ${c.id === selectedCatId ? 'selected' : ''}>
@@ -2426,7 +2795,8 @@
 
     editingTxId = txId;
     editSelectedSpentBy = getMemberInfo(tx.spentBy || 'adil').id;
-    editSelectedType = tx.type === 'income' ? 'income' : 'expense';
+    editSelectedType = (tx.type === 'income' || tx.type === 'transfer') ? tx.type : 'expense';
+    editSelectedPaidFrom = getTxPaidFrom(tx);
 
     const modal = document.getElementById('edit-modal');
     const amountInput = document.getElementById('edit-amount-input');
@@ -2445,6 +2815,10 @@
 
     document.querySelectorAll('#edit-member-selector .member-pill').forEach(btn => {
       btn.classList.toggle('active', btn.getAttribute('data-edit-member') === editSelectedSpentBy);
+    });
+
+    document.querySelectorAll('#edit-paid-from-selector .member-pill').forEach(btn => {
+      btn.classList.toggle('active', btn.getAttribute('data-edit-paid-from') === editSelectedPaidFrom);
     });
 
     populateEditCategorySelect(editSelectedType, tx.categoryId);
@@ -2468,8 +2842,6 @@
       return;
     }
 
-    const catList = editSelectedType === 'income' ? getIncomeCategories() : getExpenseCategories();
-    const catObj = catList.find(c => c.id === categorySelect.value) || catList[0];
     const memInfo = getMemberInfo(editSelectedSpentBy);
     const dVal = dateInput.value || transactions[idx].date;
     const tVal = (timeInput.value ? timeInput.value + ':00' : transactions[idx].time);
@@ -2477,10 +2849,21 @@
     const updatedDate = new Date(`${dVal}T${tVal}`);
     const ts = isNaN(updatedDate.getTime()) ? transactions[idx].timestamp : updatedDate.getTime();
 
+    let catId = 'transfer-to-faiza';
+    let catName = "Transfer to Faiza's Wallet";
+    if (editSelectedType !== 'transfer') {
+      const catList = editSelectedType === 'income' ? getIncomeCategories() : getExpenseCategories();
+      const catObj = catList.find(c => c.id === categorySelect.value) || catList[0];
+      catId = catObj.id;
+      catName = catObj.name;
+    }
+
     transactions[idx].type = editSelectedType;
     transactions[idx].amount = Math.round(amt * 100) / 100;
-    transactions[idx].categoryId = catObj.id;
-    transactions[idx].categoryName = catObj.name;
+    transactions[idx].categoryId = catId;
+    transactions[idx].categoryName = catName;
+    transactions[idx].paidFrom = editSelectedType === 'expense' ? editSelectedPaidFrom : 'buffer';
+    transactions[idx].transferTo = editSelectedType === 'transfer' ? 'faiza_wallet' : '';
     transactions[idx].spentBy = memInfo.id;
     transactions[idx].spentByName = memInfo.name;
     transactions[idx].spentByAvatar = memInfo.avatar;
@@ -2501,9 +2884,9 @@
     const currentCycle = getCyclePeriod(0);
     if (editSelectedType === 'expense' && currentCycle.isInCycle(dVal)) {
       const catSpent = transactions
-        .filter(t => (t.type || 'expense') === 'expense' && t.categoryId === catObj.id && currentCycle.isInCycle(t.date))
+        .filter(t => (t.type || 'expense') === 'expense' && t.categoryId === catId && currentCycle.isInCycle(t.date))
         .reduce((sum, t) => sum + t.amount, 0);
-      checkBudgetThresholds(catObj.id, 0, catSpent);
+      checkBudgetThresholds(catId, 0, catSpent);
     }
   }
 
@@ -2906,6 +3289,567 @@
     document.getElementById('cycle-settings-modal')?.classList.remove('active');
   }
 
+  // ==========================================================================
+  // EXPENDITURE DUE DATES & ALERTS (Rent, Bills, Salaries, etc.)
+  // ==========================================================================
+
+  function loadDueDates() {
+    try {
+      const saved = localStorage.getItem(DUE_DATES_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          dueDateItems = parsed;
+        }
+      }
+    } catch (e) {
+      console.error('Error loading due dates', e);
+      dueDateItems = [];
+    }
+
+    try {
+      const savedAlerts = localStorage.getItem(DUE_ALERTED_KEY);
+      if (savedAlerts) {
+        alertedDueKeys = JSON.parse(savedAlerts) || {};
+      }
+    } catch (e) {
+      alertedDueKeys = {};
+    }
+  }
+
+  function saveDueDates(skipCloudSync = false) {
+    try {
+      localStorage.setItem(DUE_DATES_KEY, JSON.stringify(dueDateItems));
+    } catch (e) {
+      console.error('Error saving due dates', e);
+    }
+    if (!skipCloudSync && db) {
+      uploadDueDatesToCloud(dueDateItems);
+    }
+  }
+
+  function saveAlertedDueKeys() {
+    try {
+      localStorage.setItem(DUE_ALERTED_KEY, JSON.stringify(alertedDueKeys));
+    } catch (e) {}
+  }
+
+  /**
+   * Evaluates a due date item against today's date and current transactions.
+   * Returns status ('paid' | 'overdue' | 'due-today' | 'due-soon' | 'scheduled'),
+   * badgeText, targetDateStr, daysDiff, ymKey, and whether an active alert banner should show.
+   */
+  function evaluateDueDateItem(item) {
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const dueDay = Math.min(31, Math.max(1, parseInt(item.dueDay, 10) || 1));
+    const remindDays = Math.max(0, parseInt(item.remindDaysBefore, 10) || 0);
+
+    const thisMonthDue = createClampedDate(today.getFullYear(), today.getMonth(), dueDay);
+    const ymKey = `${thisMonthDue.getFullYear()}-${String(thisMonthDue.getMonth() + 1).padStart(2, '0')}`;
+
+    const isItemPaidForMonth = (targetYm, targetDueDate) => {
+      if (item.paidPeriods && item.paidPeriods[targetYm]) {
+        return true;
+      }
+      // Also auto-detect if a matching expense was logged in this YYYY-MM
+      const titleLow = (item.title || '').trim().toLowerCase();
+      return transactions.some(tx => {
+        if (!tx || (tx.type || 'expense') !== 'expense') return false;
+        const txYm = (tx.date || '').slice(0, 7);
+        if (txYm !== targetYm) return false;
+        if (tx.paidDueId && tx.paidDueId === item.id) return true;
+        if (tx.categoryId === item.categoryId) {
+          if (item.categoryId === 'rent' && titleLow.includes('rent')) return true;
+          const notesLow = (tx.notes || '').toLowerCase();
+          if (titleLow && notesLow && (notesLow.includes(titleLow) || titleLow.includes(notesLow))) {
+            return true;
+          }
+        }
+        return false;
+      });
+    };
+
+    const paidThisMonth = isItemPaidForMonth(ymKey, thisMonthDue);
+    const fmtDateShort = (d) => d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+
+    if (paidThisMonth) {
+      // Check if next month's due date is already within the advance reminder window
+      const nextMonthDue = createClampedDate(today.getFullYear(), today.getMonth() + 1, dueDay);
+      const nextYmKey = `${nextMonthDue.getFullYear()}-${String(nextMonthDue.getMonth() + 1).padStart(2, '0')}`;
+      const daysToNext = Math.round((nextMonthDue - today) / 86400000);
+      const paidNextMonth = isItemPaidForMonth(nextYmKey, nextMonthDue);
+
+      if (!paidNextMonth && daysToNext <= remindDays) {
+        return {
+          status: daysToNext === 0 ? 'due-today' : 'due-soon',
+          badgeText: daysToNext === 0 ? 'Due Today' : `Due in ${daysToNext}d`,
+          dueDateObj: nextMonthDue,
+          dueDateFormatted: fmtDateShort(nextMonthDue),
+          daysDiff: daysToNext,
+          ymKey: nextYmKey,
+          isPaid: false,
+          shouldAlert: true,
+          severity: daysToNext === 0 ? 3 : 2
+        };
+      }
+
+      return {
+        status: 'paid',
+        badgeText: '✅ Paid',
+        dueDateObj: thisMonthDue,
+        dueDateFormatted: fmtDateShort(thisMonthDue),
+        daysDiff: Math.round((thisMonthDue - today) / 86400000),
+        ymKey,
+        isPaid: true,
+        shouldAlert: false,
+        severity: 0
+      };
+    }
+
+    const daysDiff = Math.round((thisMonthDue - today) / 86400000);
+
+    if (daysDiff < 0) {
+      const overdueDays = Math.abs(daysDiff);
+      return {
+        status: 'overdue',
+        badgeText: `Overdue ${overdueDays}d`,
+        dueDateObj: thisMonthDue,
+        dueDateFormatted: fmtDateShort(thisMonthDue),
+        daysDiff,
+        ymKey,
+        isPaid: false,
+        shouldAlert: true,
+        severity: 4
+      };
+    } else if (daysDiff === 0) {
+      return {
+        status: 'due-today',
+        badgeText: 'Due Today!',
+        dueDateObj: thisMonthDue,
+        dueDateFormatted: fmtDateShort(thisMonthDue),
+        daysDiff: 0,
+        ymKey,
+        isPaid: false,
+        shouldAlert: true,
+        severity: 3
+      };
+    } else if (daysDiff <= remindDays) {
+      return {
+        status: 'due-soon',
+        badgeText: `Due in ${daysDiff}d`,
+        dueDateObj: thisMonthDue,
+        dueDateFormatted: fmtDateShort(thisMonthDue),
+        daysDiff,
+        ymKey,
+        isPaid: false,
+        shouldAlert: true,
+        severity: 2
+      };
+    }
+
+    return {
+      status: 'scheduled',
+      badgeText: `Due ${getOrdinalSuffix(dueDay)}`,
+      dueDateObj: thisMonthDue,
+      dueDateFormatted: fmtDateShort(thisMonthDue),
+      daysDiff,
+      ymKey,
+      isPaid: false,
+      shouldAlert: false,
+      severity: 1
+    };
+  }
+
+  function renderDueDatesUI() {
+    const listContainer = document.getElementById('settings-due-dates-list');
+    const subEl = document.getElementById('settings-due-dates-sub');
+    const addBanner = document.getElementById('due-alerts-banner-add');
+    const analyticsBanner = document.getElementById('due-alerts-banner-analytics');
+
+    const evaluated = dueDateItems.map(item => ({
+      item,
+      evalInfo: evaluateDueDateItem(item),
+      cat: findCategoryById(item.categoryId) || DEFAULT_EXPENSE_CATEGORIES[0]
+    }));
+
+    // Sort: Overdue -> Due Today -> Due Soon -> Scheduled -> Paid
+    evaluated.sort((a, b) => {
+      if (b.evalInfo.severity !== a.evalInfo.severity) {
+        return b.evalInfo.severity - a.evalInfo.severity;
+      }
+      return (a.item.dueDay || 1) - (b.item.dueDay || 1);
+    });
+
+    const activeAlerts = evaluated.filter(e => e.evalInfo.shouldAlert);
+
+    if (subEl) {
+      if (dueDateItems.length === 0) {
+        subEl.textContent = 'Configure monthly reminders for Rent & Bills';
+      } else if (activeAlerts.length > 0) {
+        subEl.textContent = `${dueDateItems.length} configured • ⚠️ ${activeAlerts.length} due or upcoming`;
+      } else {
+        subEl.textContent = `${dueDateItems.length} monthly due date reminders active`;
+      }
+    }
+
+    // 1. Render Settings Due Dates List
+    if (listContainer) {
+      if (evaluated.length === 0) {
+        listContainer.innerHTML = `
+          <div style="padding: 14px; text-align: center; color: var(--text-muted); font-size: 0.8rem; border: 1px dashed var(--border-color); border-radius: var(--radius-md);">
+            No expenditure due dates configured yet. Tap <b>+ Add Due Alert</b> or use a Quick Add chip above (e.g. 🏠 House Rent, ⚡ Electricity).
+          </div>
+        `;
+      } else {
+        listContainer.innerHTML = evaluated.map(({ item, evalInfo, cat }) => {
+          const paidFromLabel = item.paidFrom === 'faiza_wallet' ? "👛 Faiza's Wallet" : '🏦 Buffer';
+          const remindLabel = Number(item.remindDaysBefore) === 0
+            ? 'Alert on due date'
+            : `Alert ${item.remindDaysBefore}d before`;
+
+          return `
+            <div class="due-date-card status-${evalInfo.status}" data-due-id="${escapeHTML(item.id)}">
+              <div class="due-card-left">
+                <div class="tx-icon-badge" style="background: ${cat.bg}; color: ${cat.color}; width: 38px; height: 38px; flex-shrink: 0;">
+                  ${ICONS[cat.icon] || ICONS['tag']}
+                </div>
+                <div class="due-card-info">
+                  <div class="due-card-title-row">
+                    <span class="due-card-title">${escapeHTML(item.title)}</span>
+                    <span class="due-status-badge ${evalInfo.status}">${escapeHTML(evalInfo.badgeText)}</span>
+                  </div>
+                  <div class="due-card-meta">
+                    <span>📅 ${getOrdinalSuffix(item.dueDay)} of month (${escapeHTML(evalInfo.dueDateFormatted)})</span>
+                    <span>• 🔔 ${escapeHTML(remindLabel)}</span>
+                    <span>• ${escapeHTML(paidFromLabel)}</span>
+                  </div>
+                </div>
+              </div>
+              <div class="due-card-right">
+                ${item.expectedAmount > 0 ? `
+                  <div class="due-card-amount">${settings.currency} ${formatNumber(item.expectedAmount)}</div>
+                ` : ''}
+                <div class="due-card-actions">
+                  ${!evalInfo.isPaid ? `
+                    <button type="button" class="btn-due-mini pay" data-due-action="pay" data-due-id="${escapeHTML(item.id)}" title="Pre-fill Add Expense form to pay this bill">
+                      Pay
+                    </button>
+                    <button type="button" class="btn-due-mini mark-paid" data-due-action="toggle-paid" data-due-id="${escapeHTML(item.id)}" data-ym="${escapeHTML(evalInfo.ymKey)}" title="Mark as Paid for this month">
+                      ✓ Paid
+                    </button>
+                  ` : `
+                    <button type="button" class="btn-due-mini unmark" data-due-action="toggle-paid" data-due-id="${escapeHTML(item.id)}" data-ym="${escapeHTML(evalInfo.ymKey)}" title="Unmark Paid status">
+                      Undo Paid
+                    </button>
+                  `}
+                  <button type="button" class="tx-action-btn edit" data-due-action="edit" data-due-id="${escapeHTML(item.id)}" title="Edit Due Date">
+                    ${ICONS['edit']}
+                  </button>
+                  <button type="button" class="tx-action-btn delete" data-due-action="delete" data-due-id="${escapeHTML(item.id)}" title="Delete Due Date">
+                    ${ICONS['trash']}
+                  </button>
+                </div>
+              </div>
+            </div>
+          `;
+        }).join('');
+      }
+    }
+
+    // 2. Render Active Due Date Banners on Add Tab & Analytics Tab
+    const renderBannerHtml = (alerts) => {
+      if (alerts.length === 0) return '';
+      return `
+        <div style="font-size: 0.76rem; font-weight: 800; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.04em; display: flex; align-items: center; justify-content: space-between;">
+          <span>🔔 Expenditure Due Date Alerts (${alerts.length})</span>
+          <button type="button" class="btn-due-mini" data-due-action="open-settings" style="font-size: 0.68rem; padding: 2px 7px;">Configure</button>
+        </div>
+        ${alerts.map(({ item, evalInfo }) => {
+          const iconEmoji = evalInfo.status === 'overdue' ? '🚨' : evalInfo.status === 'due-today' ? '⏰' : '📅';
+          const amtText = item.expectedAmount > 0 ? ` • ${settings.currency} ${formatNumber(item.expectedAmount)}` : '';
+          const paidFromText = item.paidFrom === 'faiza_wallet' ? "👛 Faiza's Wallet" : '🏦 Buffer Account';
+          return `
+            <div class="due-alert-banner-card ${evalInfo.status}">
+              <div class="due-alert-banner-left">
+                <span style="font-size: 1.25rem;">${iconEmoji}</span>
+                <div class="due-alert-banner-texts">
+                  <div class="due-alert-banner-title">
+                    <span>${escapeHTML(item.title)}</span>
+                    <span class="due-status-badge ${evalInfo.status}">${escapeHTML(evalInfo.badgeText)}</span>
+                  </div>
+                  <div class="due-alert-banner-sub">
+                    Due ${escapeHTML(evalInfo.dueDateFormatted)} (${getOrdinalSuffix(item.dueDay)})${escapeHTML(amtText)} • ${escapeHTML(paidFromText)}
+                  </div>
+                </div>
+              </div>
+              <div class="due-alert-banner-actions">
+                <button type="button" class="btn-due-mini pay" data-due-action="pay" data-due-id="${escapeHTML(item.id)}">
+                  Pay Now
+                </button>
+                <button type="button" class="btn-due-mini mark-paid" data-due-action="toggle-paid" data-due-id="${escapeHTML(item.id)}" data-ym="${escapeHTML(evalInfo.ymKey)}" title="Mark as already paid">
+                  ✓ Paid
+                </button>
+              </div>
+            </div>
+          `;
+        }).join('')}
+      `;
+    };
+
+    if (addBanner) {
+      if (activeAlerts.length > 0) {
+        addBanner.style.display = 'flex';
+        addBanner.innerHTML = renderBannerHtml(activeAlerts);
+      } else {
+        addBanner.style.display = 'none';
+        addBanner.innerHTML = '';
+      }
+    }
+
+    if (analyticsBanner) {
+      if (activeAlerts.length > 0) {
+        analyticsBanner.style.display = 'flex';
+        analyticsBanner.innerHTML = renderBannerHtml(activeAlerts);
+      } else {
+        analyticsBanner.style.display = 'none';
+        analyticsBanner.innerHTML = '';
+      }
+    }
+
+    checkAndFireDueDateNotifications(activeAlerts);
+  }
+
+  function checkAndFireDueDateNotifications(activeAlerts) {
+    if (!activeAlerts || activeAlerts.length === 0) return;
+    let newlyTriggered = [];
+
+    activeAlerts.forEach(({ item, evalInfo }) => {
+      const alertKey = `${evalInfo.ymKey}_${item.id}_${evalInfo.status}`;
+      if (!alertedDueKeys[alertKey]) {
+        alertedDueKeys[alertKey] = true;
+        newlyTriggered.push({ item, evalInfo });
+      }
+    });
+
+    if (newlyTriggered.length > 0) {
+      saveAlertedDueKeys();
+      const top = newlyTriggered[0];
+      playBudgetAlertChime(top.evalInfo.status === 'overdue' ? 95 : 75);
+
+      if ('Notification' in window && Notification.permission === 'granted') {
+        newlyTriggered.forEach(({ item, evalInfo }) => {
+          try {
+            const title = evalInfo.status === 'overdue'
+              ? `🚨 Overdue Payment: ${item.title}`
+              : evalInfo.status === 'due-today'
+              ? `⏰ Due Today: ${item.title}`
+              : `📅 Upcoming Due Date: ${item.title}`;
+            const amtStr = item.expectedAmount > 0 ? ` (${settings.currency} ${formatNumber(item.expectedAmount)})` : '';
+            new Notification(title, {
+              body: `${item.title}${amtStr} is ${evalInfo.badgeText.toLowerCase()} (${evalInfo.dueDateFormatted}).`,
+              icon: './icons/icon-192.png',
+              tag: `paragon_due_${item.id}_${evalInfo.ymKey}`
+            });
+          } catch (e) {}
+        });
+      }
+    }
+  }
+
+  function populateDueCategorySelect(selectedCatId = 'rent') {
+    const select = document.getElementById('due-category-select');
+    if (!select) return;
+    const cats = getExpenseCategories();
+    select.innerHTML = cats.map(c => `
+      <option value="${escapeHTML(c.id)}" ${c.id === selectedCatId ? 'selected' : ''}>
+        ${escapeHTML(c.name)}
+      </option>
+    `).join('');
+  }
+
+  function updateDueModalPaidFromUI() {
+    document.querySelectorAll('#due-paid-from-selector .member-pill').forEach(btn => {
+      btn.classList.toggle('active', btn.getAttribute('data-due-paid-from') === dueModalPaidFrom);
+    });
+  }
+
+  function updateDueDayChipsUI(dayVal) {
+    const num = parseInt(dayVal, 10);
+    document.querySelectorAll('#due-day-quick-chips .chip-btn').forEach(btn => {
+      btn.classList.toggle('active', parseInt(btn.getAttribute('data-due-day'), 10) === num);
+    });
+  }
+
+  function openDueDateModal(editId = null, preset = null) {
+    const modal = document.getElementById('due-date-modal');
+    const modalTitle = document.getElementById('modal-due-date-title');
+    const idInput = document.getElementById('due-item-id-input');
+    const titleInput = document.getElementById('due-title-input');
+    const amountInput = document.getElementById('due-amount-input');
+    const dayInput = document.getElementById('due-day-input');
+    const remindSelect = document.getElementById('due-remind-days-select');
+
+    if (!modal) return;
+
+    if (editId) {
+      const existing = dueDateItems.find(d => d.id === editId);
+      if (!existing) return;
+      if (modalTitle) modalTitle.textContent = 'Edit Expenditure Due Date Alert';
+      if (idInput) idInput.value = existing.id;
+      if (titleInput) titleInput.value = existing.title || '';
+      if (amountInput) amountInput.value = existing.expectedAmount > 0 ? existing.expectedAmount : '';
+      if (dayInput) dayInput.value = existing.dueDay || 5;
+      if (remindSelect) remindSelect.value = String(existing.remindDaysBefore ?? 3);
+      dueModalPaidFrom = existing.paidFrom || 'buffer';
+      populateDueCategorySelect(existing.categoryId || 'rent');
+      updateDueDayChipsUI(existing.dueDay || 5);
+    } else {
+      if (modalTitle) modalTitle.textContent = 'Add Expenditure Due Date Alert';
+      if (idInput) idInput.value = '';
+      const defTitle = preset?.title || '';
+      const defCat = preset?.categoryId || 'rent';
+      const defDay = preset?.dueDay || 5;
+      dueModalPaidFrom = preset?.paidFrom || 'buffer';
+
+      if (titleInput) titleInput.value = defTitle;
+      if (amountInput) {
+        const defaultAmt = defCat === 'rent' && settings.budgets?.rent ? settings.budgets.rent : '';
+        amountInput.value = defaultAmt;
+      }
+      if (dayInput) dayInput.value = defDay;
+      if (remindSelect) remindSelect.value = '3';
+      populateDueCategorySelect(defCat);
+      updateDueDayChipsUI(defDay);
+    }
+
+    updateDueModalPaidFromUI();
+    modal.classList.add('active');
+    setTimeout(() => titleInput?.focus(), 120);
+  }
+
+  function closeDueDateModal() {
+    document.getElementById('due-date-modal')?.classList.remove('active');
+  }
+
+  function handleSaveDueDateItem() {
+    const idInput = document.getElementById('due-item-id-input');
+    const titleInput = document.getElementById('due-title-input');
+    const catSelect = document.getElementById('due-category-select');
+    const amountInput = document.getElementById('due-amount-input');
+    const dayInput = document.getElementById('due-day-input');
+    const remindSelect = document.getElementById('due-remind-days-select');
+
+    const rawTitle = (titleInput?.value || '').trim();
+    if (!rawTitle) {
+      showToast('⚠️ Please enter an expenditure or bill name (e.g. House Rent)');
+      titleInput?.focus();
+      return;
+    }
+
+    const dueDay = Math.min(31, Math.max(1, parseInt(dayInput?.value, 10) || 1));
+    const remindDaysBefore = Math.max(0, parseInt(remindSelect?.value, 10) || 0);
+    const expectedAmount = Math.max(0, parseFloat(amountInput?.value) || 0);
+    const categoryId = catSelect?.value || 'rent';
+    const existingId = (idInput?.value || '').trim();
+
+    if (existingId) {
+      const idx = dueDateItems.findIndex(d => d.id === existingId);
+      if (idx !== -1) {
+        dueDateItems[idx] = {
+          ...dueDateItems[idx],
+          title: rawTitle,
+          categoryId,
+          dueDay,
+          remindDaysBefore,
+          expectedAmount,
+          paidFrom: dueModalPaidFrom
+        };
+      }
+    } else {
+      dueDateItems.push({
+        id: 'due_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+        title: rawTitle,
+        categoryId,
+        dueDay,
+        remindDaysBefore,
+        expectedAmount,
+        paidFrom: dueModalPaidFrom,
+        paidPeriods: {}
+      });
+    }
+
+    saveDueDates();
+    renderDueDatesUI();
+    closeDueDateModal();
+    triggerHaptic();
+    showToast(`✅ Due date alert saved for "${rawTitle}" (${getOrdinalSuffix(dueDay)} of each month)`);
+  }
+
+  function handleDeleteDueDateItem(dueId) {
+    const item = dueDateItems.find(d => d.id === dueId);
+    if (!item) return;
+    if (!confirm(`Delete monthly due date alert for "${item.title}"?`)) return;
+
+    dueDateItems = dueDateItems.filter(d => d.id !== dueId);
+    saveDueDates();
+    renderDueDatesUI();
+    triggerHaptic();
+    showToast(`Removed due date alert "${item.title}"`);
+  }
+
+  function toggleMarkDuePaid(dueId, ymKey) {
+    const item = dueDateItems.find(d => d.id === dueId);
+    if (!item) return;
+    const targetYm = ymKey || formatDateYMD(new Date()).slice(0, 7);
+    item.paidPeriods = item.paidPeriods || {};
+
+    if (item.paidPeriods[targetYm]) {
+      delete item.paidPeriods[targetYm];
+      showToast(`Marked "${item.title}" as unpaid for ${targetYm}`);
+    } else {
+      item.paidPeriods[targetYm] = true;
+      showToast(`✅ Marked "${item.title}" as Paid for this month!`);
+    }
+
+    saveDueDates();
+    renderDueDatesUI();
+    triggerHaptic();
+  }
+
+  function handlePayDueItem(dueId) {
+    const item = dueDateItems.find(d => d.id === dueId);
+    if (!item) return;
+
+    activePayingDueId = item.id;
+    selectedTxType = 'expense';
+    selectedCategory = item.categoryId || 'rent';
+    selectedPaidFrom = item.paidFrom || 'buffer';
+    if (selectedPaidFrom === 'faiza_wallet') {
+      selectedSpentBy = 'faiza';
+    } else if (selectedSpentBy === 'faiza') {
+      selectedSpentBy = 'adil';
+    }
+
+    updateTxTypeUI();
+    updateMemberSelectorsUI();
+    renderCategoriesGrid();
+    switchTab('tab-add');
+
+    const amountInput = document.getElementById('amount-input');
+    const notesInput = document.getElementById('notes-input');
+    if (amountInput) {
+      amountInput.value = item.expectedAmount > 0 ? item.expectedAmount : '';
+      amountInput.focus();
+    }
+    if (notesInput) {
+      notesInput.value = item.title;
+    }
+
+    triggerHaptic();
+    showToast(`📝 Ready to log "${item.title}" — confirm amount & tap Save Expenditure`);
+  }
+
   // --- Push Notifications Settings Helper ---
   function updateNotificationStatusUI() {
     const statusText = document.getElementById('push-notification-status-text');
@@ -2954,25 +3898,18 @@
     }
   }
 
-  // --- Header Summary Badge (House Fund Balance & Month Spend) ---
+  // --- Header Summary Badge (Cumulative Running Balances for Buffer & Faiza's Wallet) ---
   function updateMonthSummaryBadge() {
     const badge = document.getElementById('header-month-badge');
     if (!badge) return;
 
     const currentCycle = getCyclePeriod(0);
-    const cycleTxs = transactions.filter(t => currentCycle.isInCycle(t.date || t.timestamp));
-    const thisMonthExpenses = cycleTxs.filter(t => (t.type || 'expense') === 'expense');
-    const monthSpent = thisMonthExpenses.reduce((s, t) => s + t.amount, 0);
+    const stats = computeFundBalances(currentCycle);
 
-    const totalInc = cycleTxs.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
-    const totalExp = monthSpent;
-    const fundBalance = totalInc - totalExp;
-
-    const monthName = currentCycle.shortMonthName;
-    if (totalInc > 0) {
-      badge.textContent = `Fund: ${settings.currency} ${formatNumber(fundBalance)} • ${monthName}: ${formatNumber(monthSpent)}`;
+    if (stats.allTimeBufferIn > 0 || stats.allTimeTransfers > 0) {
+      badge.textContent = `🏦 Buffer: ${settings.currency} ${formatNumber(stats.bufferRunningBalance)} • 👛 Faiza: ${settings.currency} ${formatNumber(stats.faizaWalletRunningBalance)}`;
     } else {
-      badge.textContent = `${monthName} Spent: ${settings.currency} ${formatNumber(monthSpent)}`;
+      badge.textContent = `${currentCycle.shortMonthName} Spent: ${settings.currency} ${formatNumber(stats.cycleExpense)}`;
     }
   }
 
@@ -3009,6 +3946,7 @@
       exportDate: new Date().toISOString(),
       settings: settings,
       customCategories: customCategories,
+      dueDateItems: dueDateItems,
       transactions: transactions
     };
     const jsonStr = JSON.stringify(payload, null, 2);
@@ -3042,6 +3980,18 @@
               saveCustomCategories();
               renderCategoriesGrid();
               renderCategoryFilters();
+            }
+
+            if (Array.isArray(data.dueDateItems)) {
+              const existingDueIds = new Set(dueDateItems.map(d => d.id));
+              data.dueDateItems.forEach(d => {
+                if (!existingDueIds.has(d.id)) {
+                  dueDateItems.push(d);
+                  existingDueIds.add(d.id);
+                }
+              });
+              saveDueDates();
+              renderDueDatesUI();
             }
 
             const existingIds = new Set(transactions.map(t => t.id));
@@ -3093,8 +4043,12 @@
       renderTransactionsHistory();
     } else if (tabId === 'tab-analytics') {
       updateAnalytics();
+      renderDueDatesUI();
     } else if (tabId === 'tab-export') {
+      renderDueDatesUI();
       updateCSVPreview();
+    } else if (tabId === 'tab-add') {
+      renderDueDatesUI();
     }
 
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -3343,6 +4297,19 @@
       const pill = e.target.closest('.member-pill');
       if (pill) {
         selectedSpentBy = pill.getAttribute('data-member') || 'adil';
+        if (selectedTxType === 'expense') {
+          selectedPaidFrom = selectedSpentBy === 'faiza' ? 'faiza_wallet' : 'buffer';
+        }
+        updateMemberSelectorsUI();
+        triggerHaptic();
+      }
+    });
+
+    // Form Paid From Selector (Buffer Account vs Faiza's Wallet)
+    document.getElementById('form-paid-from-selector')?.addEventListener('click', (e) => {
+      const pill = e.target.closest('.member-pill');
+      if (pill) {
+        selectedPaidFrom = pill.getAttribute('data-paid-from') || 'buffer';
         updateMemberSelectorsUI();
         triggerHaptic();
       }
@@ -3373,11 +4340,29 @@
       }
     });
 
+    // Edit Modal Paid From Selector
+    document.getElementById('edit-paid-from-selector')?.addEventListener('click', (e) => {
+      const pill = e.target.closest('.member-pill');
+      if (pill) {
+        editSelectedPaidFrom = pill.getAttribute('data-edit-paid-from') || 'buffer';
+        document.querySelectorAll('#edit-paid-from-selector .member-pill').forEach(btn => {
+          btn.classList.toggle('active', btn.getAttribute('data-edit-paid-from') === editSelectedPaidFrom);
+        });
+        triggerHaptic();
+      }
+    });
+
     // Edit Modal Member Selector
     document.getElementById('edit-member-selector')?.addEventListener('click', (e) => {
       const pill = e.target.closest('.member-pill');
       if (pill) {
         editSelectedSpentBy = pill.getAttribute('data-edit-member') || 'adil';
+        if (editSelectedType === 'expense') {
+          editSelectedPaidFrom = editSelectedSpentBy === 'faiza' ? 'faiza_wallet' : 'buffer';
+          document.querySelectorAll('#edit-paid-from-selector .member-pill').forEach(btn => {
+            btn.classList.toggle('active', btn.getAttribute('data-edit-paid-from') === editSelectedPaidFrom);
+          });
+        }
         document.querySelectorAll('#edit-member-selector .member-pill').forEach(btn => {
           btn.classList.toggle('active', btn.getAttribute('data-edit-member') === editSelectedSpentBy);
         });
@@ -3397,7 +4382,8 @@
       uploadBudgetsToCloud(settings.budgets);
       uploadCustomCategoriesToCloud(customCategories);
       uploadCycleToCloud();
-      showToast('☁️ Synced all transactions, budgets, categories, and cycle dates with Paragon Cloud!');
+      uploadDueDatesToCloud(dueDateItems);
+      showToast('☁️ Synced all transactions, budgets, categories, due dates, and cycle dates with Paragon Cloud!');
     });
 
     // Transaction Action buttons (Edit & Delete delegation)
@@ -3523,12 +4509,77 @@
       if (e.target.id === 'quick-budget-modal') closeQuickBudgetModal();
     });
 
-    // Delegated click for "Edit Budget" buttons across analytics cards and alerts
+    // Expenditure Due Dates & Alerts Events
+    document.getElementById('btn-open-add-due-date')?.addEventListener('click', () => openDueDateModal());
+    document.getElementById('btn-settings-add-due-date')?.addEventListener('click', () => openDueDateModal());
+
+    document.getElementById('due-preset-chips')?.addEventListener('click', (e) => {
+      const chip = e.target.closest('.due-preset-chip');
+      if (chip) {
+        openDueDateModal(null, {
+          title: chip.getAttribute('data-preset-title') || '',
+          categoryId: chip.getAttribute('data-preset-cat') || 'bills',
+          dueDay: parseInt(chip.getAttribute('data-preset-day'), 10) || 5,
+          paidFrom: chip.getAttribute('data-preset-paid') || 'buffer'
+        });
+        triggerHaptic();
+      }
+    });
+
+    document.getElementById('due-day-quick-chips')?.addEventListener('click', (e) => {
+      const chip = e.target.closest('.chip-btn[data-due-day]');
+      if (chip) {
+        const dVal = parseInt(chip.getAttribute('data-due-day'), 10) || 5;
+        const dayInput = document.getElementById('due-day-input');
+        if (dayInput) dayInput.value = dVal;
+        updateDueDayChipsUI(dVal);
+        triggerHaptic();
+      }
+    });
+
+    document.getElementById('due-day-input')?.addEventListener('input', (e) => {
+      updateDueDayChipsUI(e.target.value);
+    });
+
+    document.getElementById('due-paid-from-selector')?.addEventListener('click', (e) => {
+      const pill = e.target.closest('.member-pill');
+      if (pill) {
+        dueModalPaidFrom = pill.getAttribute('data-due-paid-from') || 'buffer';
+        updateDueModalPaidFromUI();
+        triggerHaptic();
+      }
+    });
+
+    document.getElementById('due-modal-cancel-btn')?.addEventListener('click', closeDueDateModal);
+    document.getElementById('due-modal-save-btn')?.addEventListener('click', handleSaveDueDateItem);
+    document.getElementById('due-date-modal')?.addEventListener('click', (e) => {
+      if (e.target.id === 'due-date-modal') closeDueDateModal();
+    });
+
+    // Delegated click for "Edit Budget" and Due Date actions across cards and banners
     document.addEventListener('click', (e) => {
       const editBtn = e.target.closest('.btn-quick-edit-budget');
       if (editBtn) {
         const catId = editBtn.getAttribute('data-cat');
         if (catId) openQuickBudgetModal(catId);
+        return;
+      }
+
+      const dueActionBtn = e.target.closest('[data-due-action]');
+      if (dueActionBtn) {
+        const action = dueActionBtn.getAttribute('data-due-action');
+        const dueId = dueActionBtn.getAttribute('data-due-id');
+        if (action === 'open-settings') {
+          switchTab('tab-export');
+        } else if (action === 'pay' && dueId) {
+          handlePayDueItem(dueId);
+        } else if (action === 'toggle-paid' && dueId) {
+          toggleMarkDuePaid(dueId, dueActionBtn.getAttribute('data-ym'));
+        } else if (action === 'edit' && dueId) {
+          openDueDateModal(dueId);
+        } else if (action === 'delete' && dueId) {
+          handleDeleteDueDateItem(dueId);
+        }
       }
     });
 

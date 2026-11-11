@@ -77,11 +77,11 @@
           <span>Analytics</span>
         </button>
 
-        <button type="button" class="nav-tab-btn" id="nav-btn-export" data-tab="tab-export" aria-label="CSV Export & Settings">
+        <button type="button" class="nav-tab-btn" id="nav-btn-export" data-tab="tab-export" aria-label="Settings & Export">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+            <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
           </svg>
-          <span>Export</span>
+          <span>Settings</span>
         </button>
       </nav>
     </header>
@@ -93,21 +93,33 @@
            TAB 1: ADD EXPENSE OR INCOME (DEFAULT)
            ========================================== -->
       <section id="tab-add" class="tab-content active" aria-label="Add Transaction">
+
+        <!-- Active Due Date Alerts Banner (Rent, Bills, etc.) -->
+        <div id="due-alerts-banner-add" class="due-alerts-banner" style="display: none;">
+          <!-- Dynamically populated when Rent or Bills are upcoming, due today, or overdue -->
+        </div>
+
         <form id="expense-form" autocomplete="off">
 
-          <!-- Transaction Type Switcher (Expense vs Income / House Fund) -->
-          <div class="tx-type-switcher" id="tx-type-switcher" role="radiogroup" aria-label="Transaction Type">
+          <!-- Transaction Type Switcher (Expense vs Fund In vs Transfer to Faiza) -->
+          <div class="tx-type-switcher three-cols" id="tx-type-switcher" role="radiogroup" aria-label="Transaction Type">
             <button type="button" class="tx-type-btn active" data-type="expense" id="type-btn-expense">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" width="16" height="16">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" width="15" height="15">
                 <line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/>
               </svg>
               <span>Expense</span>
             </button>
             <button type="button" class="tx-type-btn" data-type="income" id="type-btn-income">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" width="16" height="16">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" width="15" height="15">
                 <line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/>
               </svg>
-              <span>Income / House Fund</span>
+              <span>Fund In</span>
+            </button>
+            <button type="button" class="tx-type-btn" data-type="transfer" id="type-btn-transfer">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" width="15" height="15">
+                <polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>
+              </svg>
+              <span>To Faiza</span>
             </button>
           </div>
           
@@ -138,8 +150,31 @@
             </div>
           </div>
 
+          <!-- Transfer Route Info Card (Visible when "To Faiza" Transfer is selected) -->
+          <div class="transfer-route-card" id="transfer-route-card" style="display: none;">
+            <div class="transfer-route-header">
+              <span>🔄 Internal House Fund Transfer (Dispense to Faiza)</span>
+            </div>
+            <div class="transfer-route-buckets">
+              <div class="transfer-bucket-box">
+                <span class="transfer-bucket-tag">FROM</span>
+                <span class="transfer-bucket-title">🏦 Buffer Account</span>
+                <span class="transfer-bucket-bal" id="transfer-form-buffer-bal">PKR 0.00</span>
+              </div>
+              <div class="transfer-route-arrow">➔</div>
+              <div class="transfer-bucket-box target">
+                <span class="transfer-bucket-tag">TO (DEFAULT)</span>
+                <span class="transfer-bucket-title">👛 Faiza's Wallet</span>
+                <span class="transfer-bucket-bal" id="transfer-form-faiza-bal">PKR 0.00</span>
+              </div>
+            </div>
+            <p class="transfer-route-hint">
+              Moves funds from the Buffer Account to Faiza's spending wallet without double-counting as a household expense.
+            </p>
+          </div>
+
           <!-- Category Selection -->
-          <div class="section-header">
+          <div class="section-header" id="category-section-header">
             <div>
               <h2 class="section-title" id="category-section-title">Select Category</h2>
               <span class="section-hint" id="category-count-badge">7 Categories</span>
@@ -157,7 +192,7 @@
             <!-- Populated via JavaScript with categories + "+ Add" tile -->
           </div>
 
-          <!-- Transaction Details (Member, Date/Time & Notes) -->
+          <!-- Transaction Details (Member, Paid From, Date/Time & Notes) -->
           <div class="form-card">
 
             <!-- Sibling Member (Spent By / Contributed By) -->
@@ -172,6 +207,20 @@
                 <button type="button" class="member-pill active" data-member="adil">👨 Adil</button>
                 <button type="button" class="member-pill" data-member="faiza">👩 Faiza</button>
                 <button type="button" class="member-pill" data-member="haseeb">🧑 Haseeb</button>
+              </div>
+            </div>
+
+            <!-- Paid From Source (Visible for Expenses: Buffer Account vs Faiza's Wallet) -->
+            <div class="form-group" id="expense-paid-from-group" style="margin-bottom: 14px;">
+              <label class="form-label">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+                  <path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/>
+                </svg>
+                <span>Paid From Account</span>
+              </label>
+              <div class="member-selector-row" id="form-paid-from-selector">
+                <button type="button" class="member-pill active" data-paid-from="buffer">🏦 Buffer Account</button>
+                <button type="button" class="member-pill" data-paid-from="faiza_wallet">👛 Faiza's Wallet</button>
               </div>
             </div>
             
@@ -246,7 +295,8 @@
             <span class="member-filter-label">Type:</span>
             <button type="button" class="member-filter-chip active" data-tx-type="all">All</button>
             <button type="button" class="member-filter-chip" data-tx-type="expense">💸 Expenses</button>
-            <button type="button" class="member-filter-chip" data-tx-type="income">💰 Incomes</button>
+            <button type="button" class="member-filter-chip" data-tx-type="income">💰 Fund In</button>
+            <button type="button" class="member-filter-chip" data-tx-type="transfer">🔄 Transfers</button>
           </div>
 
           <!-- Category Horizontal Filter Scroll -->
@@ -276,13 +326,13 @@
            ========================================== -->
       <section id="tab-analytics" class="tab-content" aria-label="Analytics & Breakdown">
 
-        <!-- Parents' House Fund Summary Card (Incomes vs Expenses & Sibling Contributions) -->
+        <!-- Parents' House Fund Summary Card (Buffer Account + Faiza's Wallet Running Balances & Cycle Summary) -->
         <div class="house-fund-card" id="house-fund-card">
           <div class="overall-budget-header">
             <div>
-              <span class="stat-label">Parents' Household Fund</span>
+              <span class="stat-label">Parents' Household Fund (Cumulative Running Balances)</span>
               <h2 style="font-size: 1.15rem; font-weight: 800; color: var(--text-primary); margin-top: 2px;">
-                Fund Balance &amp; Contributions
+                Buffer Account &amp; Faiza's Wallet
               </h2>
               <button type="button" class="cycle-range-pill" id="btn-fund-open-cycle-settings" title="Change timeframe for Parents' Household Fund &amp; Budget analysis">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" width="13" height="13">
@@ -295,17 +345,46 @@
             <span class="fund-status-badge" id="fund-status-badge">Active Fund</span>
           </div>
 
+          <!-- Dual Bucket Running Balances: Buffer Account vs Faiza's Spending Wallet -->
+          <div class="fund-buckets-grid">
+            <div class="fund-bucket-card buffer-bucket">
+              <div class="fund-bucket-top">
+                <span class="fund-bucket-label">🏦 Buffer Account</span>
+                <span class="fund-bucket-tag">Running Balance</span>
+              </div>
+              <div class="fund-bucket-balance positive" id="buffer-running-balance">PKR 0.00</div>
+              <div class="fund-bucket-details" id="buffer-breakdown-lines">
+                <div class="fund-bucket-line"><span>Cycle In:</span><span>PKR 0.00</span></div>
+                <div class="fund-bucket-line"><span>Direct Bills/Rent:</span><span>PKR 0.00</span></div>
+                <div class="fund-bucket-line"><span>Sent to Faiza:</span><span>PKR 0.00</span></div>
+              </div>
+            </div>
+
+            <div class="fund-bucket-card wallet-bucket">
+              <div class="fund-bucket-top">
+                <span class="fund-bucket-label">👛 Faiza's Wallet</span>
+                <span class="fund-bucket-tag">Running Balance</span>
+              </div>
+              <div class="fund-bucket-balance positive" id="faiza-wallet-running-balance">PKR 0.00</div>
+              <div class="fund-bucket-details" id="faiza-wallet-breakdown-lines">
+                <div class="fund-bucket-line"><span>Cycle Received:</span><span>PKR 0.00</span></div>
+                <div class="fund-bucket-line"><span>Cycle Spent:</span><span>PKR 0.00</span></div>
+                <div class="fund-bucket-line"><span>All-Time Received:</span><span>PKR 0.00</span></div>
+              </div>
+            </div>
+          </div>
+
           <div class="overall-budget-stats">
             <div class="stat-item">
-              <span class="stat-label">Total Incomes</span>
+              <span class="stat-label">Cycle Fund In</span>
               <span class="stat-val positive" id="fund-total-income">PKR 0.00</span>
             </div>
             <div class="stat-item">
-              <span class="stat-label">Total Spent</span>
+              <span class="stat-label">Cycle Spent</span>
               <span class="stat-val" id="fund-total-spent">PKR 0.00</span>
             </div>
             <div class="stat-item">
-              <span class="stat-label">Fund Balance</span>
+              <span class="stat-label">Total Net Fund</span>
               <span class="stat-val positive" id="fund-net-balance">PKR 0.00</span>
             </div>
           </div>
@@ -372,6 +451,11 @@
           </div>
         </div>
 
+        <!-- Active Due Date Alerts Banner in Analytics -->
+        <div id="due-alerts-banner-analytics" class="due-alerts-banner" style="display: none;">
+          <!-- Dynamically populated when Rent or Bills are upcoming, due today, or overdue -->
+        </div>
+
         <!-- Active Alerts Banner (when 50%, 75%, 90%, 100% is reached) -->
         <div id="budget-alerts-section" class="budget-alerts-section" style="display: none;">
           <!-- Dynamically populated with active threshold alerts -->
@@ -420,7 +504,42 @@
       <!-- ==========================================
            TAB 4: EXPORT & SETTINGS
            ========================================== -->
-      <section id="tab-export" class="tab-content" aria-label="CSV Export & Settings">
+      <section id="tab-export" class="tab-content" aria-label="Settings & Export">
+
+        <!-- Expenditure Due Dates & Alerts Card -->
+        <div class="settings-card" id="due-dates-settings-card">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+            <div>
+              <h2 class="section-title" style="margin: 0; display: flex; align-items: center; gap: 6px;">
+                <span>📅 Expenditure Due Dates &amp; Alerts</span>
+              </h2>
+              <p style="font-size: 0.78rem; color: var(--text-secondary); margin-top: 2px;">
+                Set monthly due dates &amp; advance alerts for Rent, Electricity, Gas, Salaries, or other recurring bills.
+              </p>
+            </div>
+            <button type="button" class="btn-add-category-pill" id="btn-open-add-due-date" style="flex-shrink: 0;">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" width="14" height="14">
+                <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+              </svg>
+              Add Due Alert
+            </button>
+          </div>
+
+          <!-- Quick Preset Chips to Add Common Bills Fast -->
+          <div class="due-preset-row" id="due-preset-chips">
+            <span class="due-preset-label">Quick Add:</span>
+            <button type="button" class="chip-btn due-preset-chip" data-preset-title="House Rent" data-preset-cat="rent" data-preset-day="5" data-preset-paid="buffer">🏠 House Rent</button>
+            <button type="button" class="chip-btn due-preset-chip" data-preset-title="Electricity Bill" data-preset-cat="bills" data-preset-day="15" data-preset-paid="buffer">⚡ Electricity</button>
+            <button type="button" class="chip-btn due-preset-chip" data-preset-title="Gas Bill" data-preset-cat="bills" data-preset-day="18" data-preset-paid="buffer">🔥 Gas Bill</button>
+            <button type="button" class="chip-btn due-preset-chip" data-preset-title="Internet / PTCL" data-preset-cat="bills" data-preset-day="20" data-preset-paid="buffer">🌐 Internet</button>
+            <button type="button" class="chip-btn due-preset-chip" data-preset-title="Staff Salaries" data-preset-cat="salaries" data-preset-day="1" data-preset-paid="faiza_wallet">💼 Salaries</button>
+          </div>
+
+          <!-- Configured Due Dates List -->
+          <div class="due-dates-list" id="settings-due-dates-list">
+            <!-- Populated via JS -->
+          </div>
+        </div>
         
         <!-- CSV Export Card -->
         <div class="settings-card">
@@ -607,6 +726,16 @@
 
           <div class="setting-row">
             <div class="setting-info">
+              <span class="setting-label">Expenditure Due Date Alerts</span>
+              <span class="setting-sub" id="settings-due-dates-sub">Configure monthly reminders for Rent &amp; Bills</span>
+            </div>
+            <button type="button" class="btn-secondary" id="btn-settings-add-due-date" style="padding: 6px 12px; font-size: 0.82rem;">
+              + Add Due Date
+            </button>
+          </div>
+
+          <div class="setting-row">
+            <div class="setting-info">
               <span class="setting-label">Budget Alerts (50%, 75%, 90%, 100%)</span>
               <span class="setting-sub" id="push-notification-status-text">In-app audio &amp; toasts active</span>
             </div>
@@ -742,7 +871,8 @@
           <label class="form-label">Transaction Type</label>
           <div class="member-selector-row" id="edit-type-selector">
             <button type="button" class="member-pill active" data-edit-type="expense">💸 Expense</button>
-            <button type="button" class="member-pill" data-edit-type="income">💰 Income / Fund</button>
+            <button type="button" class="member-pill" data-edit-type="income">💰 Fund In</button>
+            <button type="button" class="member-pill" data-edit-type="transfer">🔄 To Faiza</button>
           </div>
         </div>
         
@@ -754,7 +884,7 @@
           </div>
         </div>
 
-        <div class="form-group" style="margin-bottom: 12px;">
+        <div class="form-group" id="edit-category-group" style="margin-bottom: 12px;">
           <label for="edit-category-select" class="form-label">Category</label>
           <select id="edit-category-select" class="custom-select" style="width: 100%;">
             <!-- Loaded dynamically -->
@@ -767,6 +897,14 @@
             <button type="button" class="member-pill active" data-edit-member="adil">👨 Adil</button>
             <button type="button" class="member-pill" data-edit-member="faiza">👩 Faiza</button>
             <button type="button" class="member-pill" data-edit-member="haseeb">🧑 Haseeb</button>
+          </div>
+        </div>
+
+        <div class="form-group" id="edit-paid-from-group" style="margin-bottom: 12px;">
+          <label class="form-label">Paid From Account</label>
+          <div class="member-selector-row" id="edit-paid-from-selector">
+            <button type="button" class="member-pill active" data-edit-paid-from="buffer">🏦 Buffer Account</button>
+            <button type="button" class="member-pill" data-edit-paid-from="faiza_wallet">👛 Faiza's Wallet</button>
           </div>
         </div>
 
@@ -1000,6 +1138,90 @@
         <div class="modal-actions" style="margin-top: 18px;">
           <button type="button" class="btn-secondary" id="cycle-modal-cancel-btn">Cancel</button>
           <button type="button" class="submit-btn" id="cycle-modal-save-btn" style="padding: 12px;">Save Cycle Start</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Add / Edit Expenditure Due Date Alert Modal -->
+    <div id="due-date-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="modal-due-date-title">
+      <div class="modal-sheet" style="max-height: 90vh; display: flex; flex-direction: column; overflow-y: auto;">
+        <div class="modal-handle"></div>
+        <h3 id="modal-due-date-title" class="modal-title">Add Expenditure Due Date Alert</h3>
+        <p class="modal-desc" style="margin-bottom: 14px;">
+          Set a monthly due day and advance alert reminder for Rent, Bills, Salaries, or other recurring household payments.
+        </p>
+
+        <input type="hidden" id="due-item-id-input" value="">
+
+        <div class="form-group" style="margin-bottom: 12px;">
+          <label for="due-title-input" class="form-label">Expenditure / Bill Name</label>
+          <div class="input-field-wrapper">
+            <input type="text" id="due-title-input" class="text-input" placeholder="e.g. House Rent, Electricity Bill, Gas Bill..." maxlength="45" required>
+          </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px;">
+          <div class="form-group" style="margin-bottom: 0;">
+            <label for="due-category-select" class="form-label">Category</label>
+            <select id="due-category-select" class="custom-select" style="width: 100%;">
+              <!-- Populated dynamically with expense categories -->
+            </select>
+          </div>
+
+          <div class="form-group" style="margin-bottom: 0;">
+            <label for="due-amount-input" class="form-label">Expected Amount (Optional)</label>
+            <div class="input-field-wrapper" style="padding: 8px 10px;">
+              <span class="currency-symbol" style="margin-right: 4px; font-size: 0.85rem;">PKR</span>
+              <input type="number" id="due-amount-input" class="text-input" placeholder="0.00" min="0" step="any">
+            </div>
+          </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px;">
+          <div class="form-group" style="margin-bottom: 0;">
+            <label for="due-day-input" class="form-label">Due Day of Month (1–31)</label>
+            <div class="input-field-wrapper" style="padding: 8px 10px;">
+              <input type="number" id="due-day-input" class="text-input" min="1" max="31" value="5" required>
+            </div>
+          </div>
+
+          <div class="form-group" style="margin-bottom: 0;">
+            <label for="due-remind-days-select" class="form-label">Alert Me Before</label>
+            <select id="due-remind-days-select" class="custom-select" style="width: 100%;">
+              <option value="0">On Due Date Only</option>
+              <option value="1">1 Day Before</option>
+              <option value="2">2 Days Before</option>
+              <option value="3" selected>3 Days Before</option>
+              <option value="5">5 Days Before</option>
+              <option value="7">7 Days Before</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-group" style="margin-bottom: 12px;">
+          <label class="form-label">Quick Select Due Day</label>
+          <div class="quick-amount-chips" id="due-day-quick-chips" style="justify-content: flex-start;">
+            <button type="button" class="chip-btn" data-due-day="1">1st</button>
+            <button type="button" class="chip-btn" data-due-day="5">5th</button>
+            <button type="button" class="chip-btn" data-due-day="10">10th</button>
+            <button type="button" class="chip-btn" data-due-day="15">15th</button>
+            <button type="button" class="chip-btn" data-due-day="20">20th</button>
+            <button type="button" class="chip-btn" data-due-day="25">25th</button>
+            <button type="button" class="chip-btn" data-due-day="28">28th</button>
+          </div>
+        </div>
+
+        <div class="form-group" style="margin-bottom: 16px;">
+          <label class="form-label">Normally Paid From Account</label>
+          <div class="member-selector-row" id="due-paid-from-selector">
+            <button type="button" class="member-pill active" data-due-paid-from="buffer">🏦 Buffer Account</button>
+            <button type="button" class="member-pill" data-due-paid-from="faiza_wallet">👛 Faiza's Wallet</button>
+          </div>
+        </div>
+
+        <div class="modal-actions" style="margin-top: auto; padding-top: 8px;">
+          <button type="button" class="btn-secondary" id="due-modal-cancel-btn">Cancel</button>
+          <button type="button" class="submit-btn" id="due-modal-save-btn" style="padding: 12px;">Save Due Date Alert</button>
         </div>
       </div>
     </div>
