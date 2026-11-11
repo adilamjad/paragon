@@ -36,27 +36,30 @@
     { id: 'haseeb', name: 'Haseeb', avatar: '🧑', color: '#10b981' }
   ];
 
-  // Default Monthly Budgets for the 7 Pre-Configured Expense Categories (in PKR, editable anytime)
+  // Default Monthly Budgets for the Pre-Configured Expense Categories (in PKR, Total: 531,500)
+  const BUDGET_DEFAULTS_VERSION = 2;
   const DEFAULT_BUDGETS = {
-    'rent': 45000,
-    'salaries': 25000,
-    'bills': 20000,
-    'services': 10000,
-    'groceries': 35000,
-    'medical': 15000,
-    'others': 10000
+    'bills': 100000,
+    'salaries': 80500,
+    'groceries': 80000,
+    'rent': 96000,
+    'others': 5000,
+    'medical': 30000,
+    'pocket': 140000,
+    'services': 0,
+    '_v': BUDGET_DEFAULTS_VERSION
   };
 
   // Pre-Configured Expense Categories for Parents' Household
   const DEFAULT_EXPENSE_CATEGORIES = [
     {
-      id: 'rent',
-      name: 'Rent',
+      id: 'bills',
+      name: 'Bills',
       type: 'expense',
-      icon: 'home',
-      color: '#6366f1',
-      bg: 'rgba(99, 102, 241, 0.16)',
-      glow: 'rgba(99, 102, 241, 0.35)'
+      icon: 'zap',
+      color: '#f59e0b',
+      bg: 'rgba(245, 158, 11, 0.16)',
+      glow: 'rgba(245, 158, 11, 0.35)'
     },
     {
       id: 'salaries',
@@ -68,24 +71,6 @@
       glow: 'rgba(139, 92, 246, 0.35)'
     },
     {
-      id: 'bills',
-      name: 'Bills',
-      type: 'expense',
-      icon: 'zap',
-      color: '#f59e0b',
-      bg: 'rgba(245, 158, 11, 0.16)',
-      glow: 'rgba(245, 158, 11, 0.35)'
-    },
-    {
-      id: 'services',
-      name: 'Services',
-      type: 'expense',
-      icon: 'wrench',
-      color: '#06b6d4',
-      bg: 'rgba(6, 182, 212, 0.16)',
-      glow: 'rgba(6, 182, 212, 0.35)'
-    },
-    {
       id: 'groceries',
       name: 'Groceries',
       type: 'expense',
@@ -93,6 +78,24 @@
       color: '#10b981',
       bg: 'rgba(16, 185, 129, 0.16)',
       glow: 'rgba(16, 185, 129, 0.35)'
+    },
+    {
+      id: 'rent',
+      name: 'Rent',
+      type: 'expense',
+      icon: 'home',
+      color: '#6366f1',
+      bg: 'rgba(99, 102, 241, 0.16)',
+      glow: 'rgba(99, 102, 241, 0.35)'
+    },
+    {
+      id: 'pocket',
+      name: 'Pocket',
+      type: 'expense',
+      icon: 'wallet',
+      color: '#14b8a6',
+      bg: 'rgba(20, 184, 166, 0.16)',
+      glow: 'rgba(20, 184, 166, 0.35)'
     },
     {
       id: 'medical',
@@ -111,6 +114,15 @@
       color: '#64748b',
       bg: 'rgba(100, 116, 139, 0.16)',
       glow: 'rgba(100, 116, 139, 0.35)'
+    },
+    {
+      id: 'services',
+      name: 'Services',
+      type: 'expense',
+      icon: 'wrench',
+      color: '#06b6d4',
+      bg: 'rgba(6, 182, 212, 0.16)',
+      glow: 'rgba(6, 182, 212, 0.35)'
     }
   ];
 
@@ -261,7 +273,11 @@
 
   function getExpenseCategories() {
     const customExp = customCategories.filter(c => (c.type || 'expense') === 'expense');
-    return [...DEFAULT_EXPENSE_CATEGORIES, ...customExp];
+    const hasCustomPocket = customExp.some(c => (c.name || '').trim().toLowerCase() === 'pocket');
+    const defaults = hasCustomPocket
+      ? DEFAULT_EXPENSE_CATEGORIES.filter(c => c.id !== 'pocket')
+      : DEFAULT_EXPENSE_CATEGORIES;
+    return [...defaults, ...customExp];
   }
 
   function getIncomeCategories() {
@@ -623,19 +639,42 @@
     }
   }
 
+  function syncCustomPocketBudget() {
+    const customPocket = customCategories.find(
+      c => (c.type || 'expense') === 'expense' && (c.name || '').trim().toLowerCase() === 'pocket'
+    );
+    if (customPocket) {
+      if (!settings.budgets[customPocket.id]) {
+        settings.budgets[customPocket.id] = DEFAULT_BUDGETS.pocket;
+      }
+      settings.budgets.pocket = 0;
+    }
+  }
+
   function loadSettings() {
     try {
       const saved = localStorage.getItem(SETTINGS_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
         settings = Object.assign(settings, parsed);
-        settings.budgets = Object.assign({}, DEFAULT_BUDGETS, settings.budgets || {});
+        if (!parsed.budgets || parsed.budgets._v !== BUDGET_DEFAULTS_VERSION) {
+          // Apply updated v2 default budgets (Total: PKR 531,500)
+          settings.budgets = Object.assign({}, parsed.budgets || {}, DEFAULT_BUDGETS);
+        } else {
+          settings.budgets = Object.assign({}, DEFAULT_BUDGETS, parsed.budgets || {});
+        }
+      } else {
+        settings.budgets = Object.assign({}, DEFAULT_BUDGETS);
       }
     } catch (e) {
       console.error('Error loading settings', e);
     }
+    syncCustomPocketBudget();
     settings.householdId = DEFAULT_HOUSEHOLD_ID;
     settings.cycleStartDay = Math.min(31, Math.max(1, parseInt(settings.cycleStartDay, 10) || 1));
+    try {
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    } catch (e) {}
     updateCurrencyDisplay();
     updateCycleSettingsSubtitle();
   }
@@ -1037,10 +1076,20 @@
       if (doc.exists) {
         const cloudBudgets = doc.data();
         if (cloudBudgets) {
-          settings.budgets = Object.assign({}, DEFAULT_BUDGETS, cloudBudgets);
-          saveSettings(true);
+          if (cloudBudgets._v !== BUDGET_DEFAULTS_VERSION) {
+            // Migrate cloud budgets to v2 defaults (Total: PKR 531,500)
+            settings.budgets = Object.assign({}, cloudBudgets, DEFAULT_BUDGETS);
+            syncCustomPocketBudget();
+            saveSettings(false);
+          } else {
+            settings.budgets = Object.assign({}, DEFAULT_BUDGETS, cloudBudgets);
+            syncCustomPocketBudget();
+            saveSettings(true);
+          }
           updateAnalytics();
         }
+      } else {
+        uploadBudgetsToCloud(settings.budgets);
       }
     }, (err) => {
       console.warn('Firestore budget snapshot error:', err);
@@ -1063,6 +1112,7 @@
             }
           });
           customCategories = merged;
+          syncCustomPocketBudget();
           saveCustomCategories(!hasNewLocal);
           renderCategoriesGrid();
           renderCategoryFilters();
