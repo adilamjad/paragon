@@ -4088,10 +4088,10 @@
     if (errorEl) errorEl.style.display = 'none';
     if (confirmBtn) {
       confirmBtn.disabled = false;
-      confirmBtn.textContent = 'Purge All';
+      confirmBtn.textContent = 'Purge All Records';
     }
     if (modal) {
-      modal.style.display = 'flex';
+      modal.classList.add('active');
       setTimeout(() => pinInput?.focus(), 60);
     }
   }
@@ -4102,7 +4102,7 @@
     const errorEl = document.getElementById('purge-pin-error');
     if (pinInput) pinInput.value = '';
     if (errorEl) errorEl.style.display = 'none';
-    if (modal) modal.style.display = 'none';
+    if (modal) modal.classList.remove('active');
   }
 
   async function executePurgeAllTransactions() {
@@ -4182,7 +4182,7 @@
     } finally {
       if (confirmBtn) {
         confirmBtn.disabled = false;
-        confirmBtn.textContent = 'Purge All';
+        confirmBtn.textContent = 'Purge All Records';
       }
     }
   }
