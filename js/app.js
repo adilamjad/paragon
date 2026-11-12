@@ -17,6 +17,7 @@
   const DUE_ALERTED_KEY = 'paragon_due_alerted_v1';
   const PROFILE_STORAGE_KEY = 'paragon_device_profile_v1';
   const DEFAULT_HOUSEHOLD_ID = 'paragon_household';
+  const PURGE_SECURITY_PIN = '9998';
 
   // Google Firebase Configuration (Project: spending-tracker-6db2d, isolated room: paragon_household)
   const FIREBASE_CONFIG = {
@@ -1057,6 +1058,17 @@
         if (missingUploadCount > 0) {
           showToast(`☁️ Synced ${missingUploadCount} offline records to Paragon cloud!`);
         }
+      } else if (snapshot.docChanges().some(change => change.type === 'removed')) {
+        transactions = [];
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(transactions));
+        } catch (e) {}
+        renderTransactionsHistory();
+        updateAnalytics();
+        renderDueDatesUI();
+        updateCSVPreview();
+        updateMonthSummaryBadge();
+        updateCloudStatusUI('connected', 'Live Sync');
       } else if (transactions.length > 0) {
         uploadAllLocalTransactionsToCloud();
       } else {
@@ -4067,11 +4079,110 @@
   }
 
   function handleClearAllData() {
-    if (confirm('Are you sure you want to clear local transactions on this device? Make sure to export CSV or JSON backup first.')) {
-      if (confirm('Final confirmation: Clear local transaction data?')) {
-        transactions = [];
-        saveTransactions();
-        showToast('Local transaction data cleared');
+    const modal = document.getElementById('purge-pin-modal');
+    const pinInput = document.getElementById('purge-pin-input');
+    const errorEl = document.getElementById('purge-pin-error');
+    const confirmBtn = document.getElementById('purge-pin-confirm-btn');
+
+    if (pinInput) pinInput.value = '';
+    if (errorEl) errorEl.style.display = 'none';
+    if (confirmBtn) {
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = 'Purge All';
+    }
+    if (modal) {
+      modal.style.display = 'flex';
+      setTimeout(() => pinInput?.focus(), 60);
+    }
+  }
+
+  function closePurgePinModal() {
+    const modal = document.getElementById('purge-pin-modal');
+    const pinInput = document.getElementById('purge-pin-input');
+    const errorEl = document.getElementById('purge-pin-error');
+    if (pinInput) pinInput.value = '';
+    if (errorEl) errorEl.style.display = 'none';
+    if (modal) modal.style.display = 'none';
+  }
+
+  async function executePurgeAllTransactions() {
+    const pinInput = document.getElementById('purge-pin-input');
+    const errorEl = document.getElementById('purge-pin-error');
+    const confirmBtn = document.getElementById('purge-pin-confirm-btn');
+    const enteredPin = (pinInput?.value || '').trim();
+
+    if (enteredPin !== PURGE_SECURITY_PIN) {
+      if (errorEl) {
+        errorEl.textContent = '⚠️ Incorrect PIN. Please enter the valid 4-digit security PIN.';
+        errorEl.style.display = 'block';
+      }
+      if (pinInput) {
+        pinInput.value = '';
+        pinInput.focus();
+      }
+      return;
+    }
+
+    if (errorEl) errorEl.style.display = 'none';
+    if (confirmBtn) {
+      confirmBtn.disabled = true;
+      confirmBtn.textContent = 'Purging...';
+    }
+
+    try {
+      // 1. Clear local transactions & threshold alerts first so snapshot listener does not re-upload
+      transactions = [];
+      alertedThresholds = {};
+      dueAlertedPeriods = {};
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(transactions));
+        localStorage.setItem(ALERTS_KEY, JSON.stringify(alertedThresholds));
+        localStorage.setItem(DUE_ALERTED_KEY, JSON.stringify(dueAlertedPeriods));
+      } catch (e) {}
+
+      // Reset paid periods on due-date items since all transactions are purged
+      if (Array.isArray(dueDateItems) && dueDateItems.length > 0) {
+        dueDateItems.forEach(item => {
+          item.paidPeriods = {};
+        });
+        saveDueDates();
+      }
+
+      // 2. Purge all transaction documents from Firebase Firestore
+      let deletedCloudCount = 0;
+      if (db) {
+        const txCollection = db.collection('households').doc(DEFAULT_HOUSEHOLD_ID).collection('transactions');
+        const snapshot = await txCollection.get();
+        if (!snapshot.empty) {
+          const docs = snapshot.docs;
+          const chunkSize = 450;
+          for (let i = 0; i < docs.length; i += chunkSize) {
+            const batch = db.batch();
+            const chunk = docs.slice(i, i + chunkSize);
+            chunk.forEach((docSnap) => {
+              batch.delete(docSnap.ref);
+              deletedCloudCount++;
+            });
+            await batch.commit();
+          }
+        }
+      }
+
+      renderTransactionsHistory();
+      updateAnalytics();
+      renderDueDatesUI();
+      updateCSVPreview();
+      updateMonthSummaryBadge();
+      closePurgePinModal();
+      showToast(`🗑️ Purged all cloud (${deletedCloudCount}) & local transactions!`);
+    } catch (err) {
+      console.error('Failed to purge cloud transactions:', err);
+      showToast('⚠️ Local cleared, but cloud purge encountered an error');
+      closePurgePinModal();
+    } finally {
+      if (confirmBtn) {
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'Purge All';
       }
     }
   }
@@ -4493,6 +4604,21 @@
     }
 
     document.getElementById('btn-clear-all')?.addEventListener('click', handleClearAllData);
+    document.getElementById('purge-pin-cancel-btn')?.addEventListener('click', closePurgePinModal);
+    document.getElementById('purge-pin-confirm-btn')?.addEventListener('click', executePurgeAllTransactions);
+    document.getElementById('purge-pin-modal')?.addEventListener('click', (e) => {
+      if (e.target.id === 'purge-pin-modal') closePurgePinModal();
+    });
+    document.getElementById('purge-pin-input')?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        executePurgeAllTransactions();
+      }
+    });
+    document.getElementById('purge-pin-input')?.addEventListener('input', () => {
+      const errorEl = document.getElementById('purge-pin-error');
+      if (errorEl) errorEl.style.display = 'none';
+    });
 
     // CSV Import Events
     const importFileInput = document.getElementById('import-csv-file-input');
