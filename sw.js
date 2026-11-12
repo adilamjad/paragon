@@ -1,5 +1,5 @@
 // Service Worker for Paragon PWA
-const CACHE_NAME = 'paragon-cache-v11';
+const CACHE_NAME = 'paragon-cache-v13';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',

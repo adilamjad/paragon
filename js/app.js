@@ -1019,6 +1019,11 @@
 
     firestoreUnsubscribe = txCollection.onSnapshot((snapshot) => {
       isSyncingFromCloud = true;
+      const removedIds = new Set(
+        snapshot.docChanges()
+          .filter(change => change.type === 'removed')
+          .map(change => change.doc.id)
+      );
       const cloudTxs = [];
       snapshot.forEach((doc) => {
         const data = doc.data();
@@ -1026,53 +1031,40 @@
           const normDate = normalizeDateYMD(data.date, data.timestamp);
           if (normDate) data.date = normDate;
           data.amount = Number(data.amount) || 0;
+          data._synced = true;
           cloudTxs.push(data);
         }
       });
 
-      if (cloudTxs.length > 0) {
-        const cloudIds = new Set(cloudTxs.map(t => t.id));
-        let missingUploadCount = 0;
-        transactions.forEach((localTx) => {
-          if (!cloudIds.has(localTx.id)) {
-            uploadTransactionToCloud(localTx);
-            cloudTxs.push(localTx);
-            missingUploadCount++;
-          }
-        });
+      const cloudIds = new Set(cloudTxs.map(t => t.id));
+      let missingUploadCount = 0;
 
-        cloudTxs.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-        transactions = cloudTxs;
-
-        try {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(transactions));
-        } catch (e) {}
-
-        renderTransactionsHistory();
-        updateAnalytics();
-        renderDueDatesUI();
-        updateCSVPreview();
-        updateMonthSummaryBadge();
-        updateCloudStatusUI('connected', 'Live Sync');
-
-        if (missingUploadCount > 0) {
-          showToast(`☁️ Synced ${missingUploadCount} offline records to Paragon cloud!`);
+      // Only upload local transactions that were created offline (_synced !== true) and not just removed
+      transactions.forEach((localTx) => {
+        if (!cloudIds.has(localTx.id) && !removedIds.has(localTx.id) && !localTx._synced) {
+          localTx._synced = true;
+          uploadTransactionToCloud(localTx);
+          cloudTxs.push(localTx);
+          missingUploadCount++;
         }
-      } else if (snapshot.docChanges().some(change => change.type === 'removed')) {
-        transactions = [];
-        try {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(transactions));
-        } catch (e) {}
-        renderTransactionsHistory();
-        updateAnalytics();
-        renderDueDatesUI();
-        updateCSVPreview();
-        updateMonthSummaryBadge();
-        updateCloudStatusUI('connected', 'Live Sync');
-      } else if (transactions.length > 0) {
-        uploadAllLocalTransactionsToCloud();
-      } else {
-        updateCloudStatusUI('connected', 'Live Sync');
+      });
+
+      cloudTxs.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+      transactions = cloudTxs;
+
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(transactions));
+      } catch (e) {}
+
+      renderTransactionsHistory();
+      updateAnalytics();
+      renderDueDatesUI();
+      updateCSVPreview();
+      updateMonthSummaryBadge();
+      updateCloudStatusUI('connected', 'Live Sync');
+
+      if (missingUploadCount > 0) {
+        showToast(`☁️ Synced ${missingUploadCount} offline records to Paragon cloud!`);
       }
 
       isSyncingFromCloud = false;
@@ -1193,6 +1185,10 @@
 
     db.collection('households').doc(householdId).collection('transactions').doc(tx.id).set(tx)
       .then(() => {
+        tx._synced = true;
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(transactions));
+        } catch (e) {}
         updateCloudStatusUI('connected', 'Live Sync');
       })
       .catch((err) => {
@@ -4133,11 +4129,11 @@
       // 1. Clear local transactions & threshold alerts first so snapshot listener does not re-upload
       transactions = [];
       alertedThresholds = {};
-      dueAlertedPeriods = {};
+      alertedDueKeys = {};
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(transactions));
         localStorage.setItem(ALERTS_KEY, JSON.stringify(alertedThresholds));
-        localStorage.setItem(DUE_ALERTED_KEY, JSON.stringify(dueAlertedPeriods));
+        localStorage.setItem(DUE_ALERTED_KEY, JSON.stringify(alertedDueKeys));
       } catch (e) {}
 
       // Reset paid periods on due-date items since all transactions are purged
